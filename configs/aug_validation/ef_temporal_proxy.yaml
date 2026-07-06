@@ -18,8 +18,11 @@ model:
 
 train:
   epochs: 8
-  batch_size: 4
-  num_workers: 4
+  batch_size: 16
+  num_workers: 16
+  prefetch_factor: 4
+  persistent_workers: true
+  pin_memory: true
   lr: 1.0e-3
   weight_decay: 1.0e-4
   debug_limit: 24

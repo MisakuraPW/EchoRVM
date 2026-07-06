@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import random_split
 from tqdm import tqdm
 
 from .augment_recipes import load_recipe
@@ -13,7 +13,7 @@ from .datasets import CAMUSSegDataset
 from .losses import seg_loss
 from .metrics import MetricsCSV, dice_per_class
 from .models import LightUNet
-from .train_common import device_from_config, load_config, make_run_dir, save_checkpoint, save_run_metadata, seed_everything
+from .train_common import build_dataloader, configure_torch_runtime, device_from_config, load_config, make_run_dir, save_checkpoint, save_run_metadata, seed_everything
 
 
 def main() -> int:
@@ -27,6 +27,7 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    configure_torch_runtime()
     seed = int(args.seed if args.seed is not None else cfg.get("experiment", {}).get("seed", 42))
     seed_everything(seed)
     train_cfg = cfg.get("train", {})
@@ -44,8 +45,8 @@ def main() -> int:
     val_size = max(1, int(len(dataset) * float(data_cfg.get("val_fraction", 0.2))))
     train_size = len(dataset) - val_size
     train_ds, val_ds = random_split(dataset, [train_size, val_size], generator=torch.Generator().manual_seed(seed))
-    train_loader = DataLoader(train_ds, batch_size=train_cfg.get("batch_size", 8), shuffle=True, num_workers=train_cfg.get("num_workers", 2), pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=train_cfg.get("batch_size", 8), shuffle=False, num_workers=train_cfg.get("num_workers", 2), pin_memory=True)
+    train_loader = build_dataloader(train_ds, train_cfg, default_batch_size=8, shuffle=True)
+    val_loader = build_dataloader(val_ds, train_cfg, default_batch_size=8, shuffle=False)
 
     device = device_from_config()
     num_classes = int(model_cfg.get("num_classes", 4))
@@ -61,8 +62,8 @@ def main() -> int:
         train_loss = 0.0
         seen = 0
         for batch in tqdm(train_loader, desc=f"unet epoch {epoch}"):
-            x = batch["image"].to(device)
-            y = batch["mask"].to(device).clamp(0, num_classes - 1)
+            x = batch["image"].to(device, non_blocking=True)
+            y = batch["mask"].to(device, non_blocking=True).clamp(0, num_classes - 1)
             logits = model(x)
             loss = seg_loss(logits, y, num_classes)
             opt.zero_grad(set_to_none=True)
@@ -81,8 +82,8 @@ def main() -> int:
         dice_accum = []
         with torch.no_grad():
             for batch in val_loader:
-                x = batch["image"].to(device)
-                y = batch["mask"].to(device).clamp(0, num_classes - 1)
+                x = batch["image"].to(device, non_blocking=True)
+                y = batch["mask"].to(device, non_blocking=True).clamp(0, num_classes - 1)
                 logits = model(x)
                 loss = seg_loss(logits, y, num_classes)
                 val_loss += loss.item() * x.size(0)

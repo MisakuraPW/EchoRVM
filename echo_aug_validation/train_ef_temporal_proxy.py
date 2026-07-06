@@ -6,14 +6,13 @@ import argparse
 
 import torch
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from .augment_recipes import load_recipe
 from .datasets import EchoNetEFDataset
 from .metrics import MetricsCSV, ef_metrics
 from .models import CNNGRUEF
-from .train_common import device_from_config, load_config, make_run_dir, save_checkpoint, save_run_metadata, seed_everything
+from .train_common import build_dataloader, configure_torch_runtime, device_from_config, load_config, make_run_dir, save_checkpoint, save_run_metadata, seed_everything
 
 
 def main() -> int:
@@ -27,6 +26,7 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    configure_torch_runtime()
     seed = int(args.seed if args.seed is not None else cfg.get("experiment", {}).get("seed", 42))
     seed_everything(seed)
     train_cfg = cfg.get("train", {})
@@ -40,8 +40,8 @@ def main() -> int:
     limit = train_cfg.get("debug_limit", 32) if args.debug else data_cfg.get("limit")
     train_ds = EchoNetEFDataset(data_cfg["echonet_root"], data_cfg.get("train_split", "TRAIN"), model_cfg.get("num_frames", 32), aug_cfg, per_frame, seed, limit)
     val_ds = EchoNetEFDataset(data_cfg["echonet_root"], data_cfg.get("val_split", "VAL"), model_cfg.get("num_frames", 32), None, False, seed, limit)
-    train_loader = DataLoader(train_ds, batch_size=train_cfg.get("batch_size", 4), shuffle=True, num_workers=train_cfg.get("num_workers", 2), pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=train_cfg.get("batch_size", 4), shuffle=False, num_workers=train_cfg.get("num_workers", 2), pin_memory=True)
+    train_loader = build_dataloader(train_ds, train_cfg, default_batch_size=4, shuffle=True)
+    val_loader = build_dataloader(val_ds, train_cfg, default_batch_size=4, shuffle=False)
 
     device = device_from_config()
     model = CNNGRUEF(feat_dim=int(model_cfg.get("feat_dim", 128)), hidden_dim=int(model_cfg.get("hidden_dim", 128))).to(device)
@@ -56,8 +56,8 @@ def main() -> int:
         train_loss = 0.0
         seen = 0
         for batch in tqdm(train_loader, desc=f"ef epoch {epoch}"):
-            x = batch["video"].to(device)
-            y = batch["target"].to(device)
+            x = batch["video"].to(device, non_blocking=True)
+            y = batch["target"].to(device, non_blocking=True)
             pred = model(x)
             loss = F.smooth_l1_loss(pred, y)
             opt.zero_grad(set_to_none=True)
@@ -76,8 +76,8 @@ def main() -> int:
         val_seen = 0
         with torch.no_grad():
             for batch in val_loader:
-                x = batch["video"].to(device)
-                y = batch["target"].to(device)
+                x = batch["video"].to(device, non_blocking=True)
+                y = batch["target"].to(device, non_blocking=True)
                 pred = model(x)
                 loss = F.smooth_l1_loss(pred, y)
                 val_loss += loss.item() * x.size(0)
