@@ -61,9 +61,12 @@ def augment_video(video: np.ndarray, cfg: EchoAugmentConfig, seed: int, per_fram
 
 def _zoom_pair(image: np.ndarray, mask: np.ndarray, scale: float) -> tuple[np.ndarray, np.ndarray]:
     h, w = image.shape[:2]
+    channels = image.shape[2:] if image.ndim > 2 else ()
     nh, nw = max(1, round(h * scale)), max(1, round(w * scale))
     img = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
     msk = cv2.resize(mask.astype(np.uint8), (nw, nh), interpolation=cv2.INTER_NEAREST)
+    if channels and img.ndim == 2:
+        img = img[:, :, None]
     if scale >= 1.0:
         y0 = (nh - h) // 2
         x0 = (nw - w) // 2
@@ -103,4 +106,8 @@ def augment_image_mask(image: np.ndarray, mask: np.ndarray, cfg: EchoAugmentConf
         image = EchoClipAugmentor(no_zoom_cfg, seed=seed + 17)(image)[0]
     else:
         image = EchoClipAugmentor(cfg, seed=seed)(image)[0]
+    if image.ndim == 3 and image.shape[-1] == 1:
+        image = image[:, :, 0]
+    elif image.ndim == 3:
+        image = image.mean(axis=-1)
     return image, mask.astype(np.int64)
