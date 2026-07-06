@@ -1,0 +1,26 @@
+experiment:
+  name: unet_seg_proxy
+  seed: 42
+  output_root: /root/autodl-tmp/outputs/aug_validation
+
+data:
+  camus_root: /root/autodl-fs/datasets/CAMUS
+  split: training
+  val_fraction: 0.2
+  limit: null
+
+model:
+  name: light_unet
+  input_size: 112
+  in_chans: 1
+  num_classes: 4
+  base_channels: 16
+
+train:
+  epochs: 10
+  batch_size: 8
+  num_workers: 4
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  debug_limit: 24
+  max_steps: null

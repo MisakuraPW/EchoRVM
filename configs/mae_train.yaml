@@ -1,0 +1,87 @@
+experiment:
+  name: mae_echonet_camus_pretrain
+  description: "Stage-1 recurrent MAE pretraining on EchoNet-Dynamic and CAMUS."
+  seed: 42
+  output_root: /root/autodl-tmp/outputs
+
+data:
+  datasets:
+    - name: EchoNet-Dynamic
+      data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
+      enabled: true
+      weight: 1.0
+    - name: CAMUS
+      data_root: /root/autodl-tmp/datasets/CAMUS
+      enabled: true
+      weight: 1.0
+  train_split: train
+  val_split: val
+  sampler: dataset_balanced
+  temperature_alpha: 0.5
+  num_workers: 4
+  pin_memory: true
+
+augment:
+  preset: echo_clip_consistent
+  tgc_prob: 0.4
+  gamma_contrast_prob: 0.4
+  zoom_prob: 0.3
+  speckle_prob: 0.4
+  shadow_prob: 0.1
+
+model:
+  name: rvm_mae
+  img_size: 112
+  patch_size: 8
+  frames: 16
+  tubelet_size: 2
+  in_chans: 1
+  embed_dim: 384
+  depth: 12
+  num_heads: 6
+  decoder_embed_dim: 192
+  decoder_depth: 4
+  decoder_num_heads: 3
+  mask_ratio: 0.75
+  recurrent_core: rvm
+  use_ttt_refine: false
+  reconstruction_target: median_blur
+
+optimizer:
+  name: AdamW
+  lr: 1.0e-4
+  weight_decay: 0.05
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+  min_lr: 1.0e-6
+
+train:
+  epochs: 100
+  batch_size: 16
+  grad_accum_steps: 1
+  mixed_precision: true
+  clip_grad_norm: 1.0
+  log_interval: 20
+  val_interval: 1
+  save_interval: 1
+  plot_interval: 1
+  max_steps: null
+  stop_on_nan: true
+
+checkpoint:
+  resume: null
+  auto_resume: true
+  save_last: true
+  save_best: true
+  save_every_n_epochs: 5
+  monitor: val_loss
+  mode: min
+
+logging:
+  use_tqdm: true
+  use_tensorboard: true
+  save_jsonl: true
+  save_csv: true
+  save_plots: true

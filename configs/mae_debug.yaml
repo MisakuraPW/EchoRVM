@@ -1,0 +1,77 @@
+experiment:
+  name: mae_debug
+  description: "Smoke test for recurrent echocardiography MAE."
+  seed: 42
+  output_root: /root/autodl-tmp/outputs
+
+data:
+  datasets:
+    - name: EchoNet-Dynamic
+      data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
+      enabled: true
+    - name: CAMUS
+      data_root: /root/autodl-tmp/datasets/CAMUS
+      enabled: true
+  train_split: train
+  val_split: val
+  num_workers: 0
+  pin_memory: true
+
+model:
+  name: rvm_mae
+  img_size: 112
+  patch_size: 8
+  frames: 16
+  tubelet_size: 2
+  in_chans: 1
+  embed_dim: 384
+  depth: 12
+  num_heads: 6
+  decoder_embed_dim: 192
+  decoder_depth: 4
+  decoder_num_heads: 3
+  mask_ratio: 0.75
+
+optimizer:
+  name: AdamW
+  lr: 1.0e-4
+  weight_decay: 0.05
+
+scheduler:
+  name: cosine
+  warmup_epochs: 1
+  min_lr: 1.0e-6
+
+train:
+  epochs: 1
+  batch_size: 2
+  grad_accum_steps: 1
+  mixed_precision: true
+  clip_grad_norm: 1.0
+  log_interval: 1
+  val_interval: null
+  save_interval: 1
+  plot_interval: 1
+  max_steps: 20
+  stop_on_nan: true
+
+checkpoint:
+  resume: null
+  auto_resume: false
+  save_last: true
+  save_best: false
+  save_every_n_epochs: 1
+  monitor: val_loss
+  mode: min
+
+logging:
+  use_tqdm: true
+  use_tensorboard: true
+  save_jsonl: true
+  save_csv: true
+  save_plots: true
+
+debug:
+  enabled: true
+  max_steps: 20
+  overfit_one_batch: false

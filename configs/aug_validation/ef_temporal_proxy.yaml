@@ -1,0 +1,26 @@
+experiment:
+  name: ef_temporal_proxy
+  seed: 42
+  output_root: /root/autodl-tmp/outputs/aug_validation
+
+data:
+  echonet_root: /root/autodl-fs/datasets/EchoNet-Dynamic
+  train_split: TRAIN
+  val_split: VAL
+  limit: null
+
+model:
+  name: cnn_gru_ef_proxy
+  input_size: 112
+  num_frames: 32
+  feat_dim: 128
+  hidden_dim: 128
+
+train:
+  epochs: 8
+  batch_size: 4
+  num_workers: 4
+  lr: 1.0e-3
+  weight_decay: 1.0e-4
+  debug_limit: 24
+  max_steps: null

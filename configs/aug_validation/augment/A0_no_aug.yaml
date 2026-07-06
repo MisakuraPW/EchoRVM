@@ -1,0 +1,10 @@
+id: A0_no_aug
+per_frame_random: false
+params:
+  tgc_prob: 0.0
+  gamma_contrast_prob: 0.0
+  brightness_prob: 0.0
+  zoom_prob: 0.0
+  blur_prob: 0.0
+  shadow_prob: 0.0
+  speckle_prob: 0.0

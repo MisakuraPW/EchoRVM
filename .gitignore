@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+conda_env/
+
+# IDE
+.vscode/
+.idea/
+.git.broken-*/
+
+# Private research notes and references
+docs/
+资料/
+
+# Logs and experiment trackers
+log/
+logs/
+agent_logs/
+*.log
+runs/
+wandb/
+tensorboard/
+
+# Outputs and checkpoints
+outputs/
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Data and generated caches
+data/
+datasets/
+augmented/
+cache/
+*.nii
+*.nii.gz
+*.mhd
+*.raw
+*.dcm
+*.mp4
+*.avi
+*.npy
+*.npz
+
+# Keep tiny test assets trackable if needed later.
+!tests/assets/
+!tests/assets/**
+!sample_data/
+!sample_data/**
+
+# System
+.DS_Store
+Thumbs.db
