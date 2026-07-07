@@ -21,7 +21,8 @@ conda_env/
 .git.broken-*/
 
 # Private research notes and references
-docs/
+docs/*
+!docs/rmae_model_and_training.md
 资料/
 
 # Logs and experiment trackers

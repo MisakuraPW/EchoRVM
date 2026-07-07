@@ -30,11 +30,11 @@ augment:
   shadow_prob: 0.1
 
 model:
-  name: rvm_mae
+  name: echo_rmae
+  core_type: rvm
   img_size: 112
   patch_size: 8
   frames: 16
-  tubelet_size: 2
   in_chans: 1
   embed_dim: 384
   depth: 12
@@ -44,12 +44,19 @@ model:
   decoder_num_heads: 3
   mask_ratio: 0.75
   recurrent_core: rvm
+  core_depth: 2
   use_ttt_refine: false
   reconstruction_target: median_blur
+  align_weight: 0.0
+  state_smooth_weight: 0.0
 
 optimizer:
-  name: AdamW
+  name: muon_adamw_hybrid
   lr: 1.0e-4
+  muon_lr: 1.0e-4
+  adamw_lr: 1.0e-4
+  muon_momentum: 0.95
+  muon_ns_steps: 5
   weight_decay: 0.05
 
 scheduler:
@@ -62,6 +69,9 @@ train:
   batch_size: 16
   grad_accum_steps: 1
   mixed_precision: true
+  channels_last: false
+  torch_compile: false
+  gradient_checkpointing: false
   clip_grad_norm: 1.0
   log_interval: 20
   val_interval: 1
@@ -85,3 +95,8 @@ logging:
   save_jsonl: true
   save_csv: true
   save_plots: true
+
+early_stopping:
+  enabled: true
+  patience: 20
+  min_delta: 1.0e-4

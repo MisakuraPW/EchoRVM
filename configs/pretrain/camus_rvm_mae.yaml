@@ -1,21 +1,19 @@
 experiment:
-  name: mae_debug
-  description: "Smoke test for recurrent echocardiography MAE."
+  name: camus_rvm_mae
+  description: "Single-dataset CAMUS pretraining for EchoRVM-MAE."
   seed: 42
   output_root: /root/autodl-tmp/outputs
 
 data:
-  datasets:
-    - name: EchoNet-Dynamic
-      data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
-      enabled: true
-    - name: CAMUS
-      data_root: /root/autodl-tmp/datasets/CAMUS
-      enabled: true
+  dataset_name: CAMUS
+  data_root: /root/autodl-tmp/datasets/CAMUS
   train_split: train
   val_split: val
-  num_workers: 0
+  num_workers: 4
   pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  drop_last: true
 
 model:
   name: echo_rmae
@@ -25,16 +23,14 @@ model:
   frames: 16
   in_chans: 1
   embed_dim: 384
-  depth: 2
+  depth: 12
   num_heads: 6
   decoder_embed_dim: 192
-  decoder_depth: 1
+  decoder_depth: 4
   decoder_num_heads: 3
   mask_ratio: 0.75
-  core_depth: 1
-  drop_path_rate: 0.0
-  align_weight: 0.0
-  state_smooth_weight: 0.0
+  core_depth: 2
+  drop_path_rate: 0.05
 
 optimizer:
   name: muon_adamw_hybrid
@@ -45,31 +41,30 @@ optimizer:
 
 scheduler:
   name: cosine
-  warmup_epochs: 1
+  warmup_epochs: 10
   min_lr: 1.0e-6
 
 train:
-  epochs: 1
-  batch_size: 2
+  epochs: 100
+  batch_size: 16
   grad_accum_steps: 1
   mixed_precision: true
   channels_last: false
   torch_compile: false
   gradient_checkpointing: false
   clip_grad_norm: 1.0
-  log_interval: 1
-  val_interval: null
-  save_interval: 1
+  log_interval: 20
+  val_interval: 1
   plot_interval: 1
-  max_steps: 20
+  max_steps: null
   stop_on_nan: true
 
 checkpoint:
   resume: null
-  auto_resume: false
+  auto_resume: true
   save_last: true
   save_best: true
-  save_every_n_epochs: 1
+  save_every_n_epochs: 5
   monitor: val_loss
   mode: min
 
@@ -81,11 +76,6 @@ logging:
   save_plots: true
 
 early_stopping:
-  enabled: false
+  enabled: true
   patience: 20
   min_delta: 1.0e-4
-
-debug:
-  enabled: true
-  max_steps: 20
-  overfit_one_batch: false
