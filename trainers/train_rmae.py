@@ -29,6 +29,7 @@ from tqdm import tqdm
 
 from models import build_echo_rmae
 from optim import build_optimizer
+from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter, build_echo_augment_config
 from utils.checkpoint import find_last_checkpoint, load_checkpoint, save_checkpoint
 from utils.config import load_config, resolve_output_root, save_config
 from utils.early_stopping import EarlyStopping
@@ -93,6 +94,9 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
     in_chans = int(model_cfg.get("in_chans", 1))
     length = int(data_cfg.get(f"synthetic_{split}_samples", max(8, batch_size * max(1, max_steps or 20))))
     dataset = SyntheticEchoVideoDataset(length=length, frames=frames, img_size=img_size, in_chans=in_chans)
+    augment_cfg = cfg.get("augment", {})
+    if split == "train" and bool(augment_cfg.get("enabled", False)):
+        dataset = AugmentedVideoDataset(dataset, EchoVideoAugmenter(augment_cfg, img_size=img_size, channels=in_chans))
     workers = int(data_cfg.get("num_workers", 0))
     kwargs: dict[str, Any] = {
         "batch_size": batch_size,
@@ -243,6 +247,24 @@ def main() -> int:
     logger = setup_logger(run_dir / "logs" / "train.log")
     logger.info("run_dir=%s", run_dir)
     logger.info("command=%s", " ".join(sys.argv))
+    augment_cfg = cfg.get("augment", {})
+    if bool(augment_cfg.get("enabled", False)):
+        aug, per_frame_random, preset = build_echo_augment_config(augment_cfg, img_size=int(cfg.get("model", {}).get("img_size", 112)))
+        logger.info(
+            "augment enabled preset=%s per_frame_random=%s img_size=%d tgc=%.2f gamma_contrast=%.2f brightness=%.2f zoom=%.2f blur=%.2f speckle=%.2f shadow=%.2f",
+            preset,
+            per_frame_random,
+            aug.img_size,
+            aug.tgc_prob,
+            aug.gamma_contrast_prob,
+            aug.brightness_prob,
+            aug.zoom_prob,
+            aug.blur_prob,
+            aug.speckle_prob,
+            aug.shadow_prob,
+        )
+    else:
+        logger.info("augment disabled")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if hasattr(torch, "set_float32_matmul_precision"):

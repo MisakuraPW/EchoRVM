@@ -395,3 +395,88 @@ median-blur target 接口预留，当前 synthetic smoke test 不启用真实图
 ```
 
 下一步接数据层时，只要 dataloader 返回 `{"video": [B,T,1,112,112]}`，当前训练代码即可复用。
+
+## 9. 在线数据增强 A4
+
+正式 MAE 预训练默认使用在线增强，不预先生成固定增强数据集。当前实现复用：
+
+```python
+from augment.ultrasound import EchoAugmentConfig, EchoClipAugmentor
+from echo_aug_validation.augment_recipes import augment_video, augment_image_mask
+```
+
+训练入口中新增了 `utils/augmentation.py`，会把 dataset 返回的单个 clip 从 `[T,1,H,W]` tensor 转成增强代码需要的 `[T,H,W,C]`，增强后再转回 `[T,1,112,112]`。增强只在 `train` split 启用，`val` split 不增强。
+
+默认 preset 是 `A4_tgc_zoom_speckle`：
+
+```yaml
+augment:
+  enabled: true
+  preset: A4_tgc_zoom_speckle
+  per_frame_random: false
+  img_size: 112
+  tgc_prob: 0.4
+  gamma_contrast_prob: 0.5
+  brightness_prob: 0.3
+  zoom_prob: 0.3
+  blur_prob: 0.2
+  speckle_prob: 0.4
+  shadow_prob: 0.0
+  tgc_min: 0.75
+  tgc_max: 1.35
+  gamma_min: 0.75
+  gamma_max: 1.35
+  contrast_min: 0.85
+  contrast_max: 1.20
+  brightness_delta: 0.08
+  zoom_min: 0.92
+  zoom_max: 1.12
+  speckle_sigma_min: 0.03
+  speckle_sigma_max: 0.10
+```
+
+`per_frame_random: false` 很重要：同一个 clip 内 TGC、gamma、zoom、blur 等参数保持一致，避免破坏心动周期时序。
+
+EchoNet clip 推荐流程：
+
+```text
+[T,H,W] 或 [T,H,W,C]
+  -> dataset 采样 clip
+  -> 转成 [T,1,H,W] float32
+  -> AugmentedVideoDataset 在线 A4 增强
+  -> batch [B,T,1,112,112]
+```
+
+CAMUS 用于 MAE 预训练时不需要 mask。可以把单帧扩展成短 clip，或重复成 `T` 帧后再走同一套 A4 image-only 增强。如果以后做分割下游，image/mask 要用 `augment_image_mask` 保证 zoom 对齐。
+
+关闭增强只需要：
+
+```yaml
+augment:
+  enabled: false
+```
+
+训练日志会打印当前增强设置，例如：
+
+```text
+augment enabled preset=A4_tgc_zoom_speckle per_frame_random=False ...
+```
+
+效率调节时按这个规则判断：
+
+```text
+GPU 利用率低、CPU 也低：
+  增加 num_workers / prefetch_factor
+
+GPU 利用率低、CPU 高：
+  不要继续加 worker
+  优先把数据从 autodl-fs 复制到 autodl-tmp
+  或减少在线增强复杂度
+
+显存低、GPU 有空：
+  增大 batch_size
+
+OOM：
+  降低 batch_size
+  或增加 grad_accum_steps
+```

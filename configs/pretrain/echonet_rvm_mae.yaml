@@ -15,6 +15,30 @@ data:
   prefetch_factor: 4
   drop_last: true
 
+augment:
+  enabled: true
+  preset: A4_tgc_zoom_speckle
+  per_frame_random: false
+  img_size: 112
+  tgc_prob: 0.4
+  gamma_contrast_prob: 0.5
+  brightness_prob: 0.3
+  zoom_prob: 0.3
+  blur_prob: 0.2
+  speckle_prob: 0.4
+  shadow_prob: 0.0
+  tgc_min: 0.75
+  tgc_max: 1.35
+  gamma_min: 0.75
+  gamma_max: 1.35
+  contrast_min: 0.85
+  contrast_max: 1.20
+  brightness_delta: 0.08
+  zoom_min: 0.92
+  zoom_max: 1.12
+  speckle_sigma_min: 0.03
+  speckle_sigma_max: 0.10
+
 model:
   name: echo_rmae
   core_type: rvm
