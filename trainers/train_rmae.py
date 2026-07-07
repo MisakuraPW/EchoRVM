@@ -2,9 +2,6 @@
 
 The current data contract is deliberately small:
     batch = {"video": Tensor[B, T, 1, 112, 112]}
-
-Until real EchoNet/CAMUS loaders are wired in, this trainer uses a synthetic
-dataset for smoke tests and engineering validation.
 """
 
 from __future__ import annotations
@@ -32,6 +29,7 @@ from optim import build_optimizer
 from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter, build_echo_augment_config
 from utils.checkpoint import find_last_checkpoint, load_checkpoint, save_checkpoint
 from utils.config import load_config, resolve_output_root, save_config
+from utils.datasets import build_rmae_dataset
 from utils.early_stopping import EarlyStopping
 from utils.logger import setup_logger
 from utils.metrics_logger import MetricsLogger
@@ -95,16 +93,11 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
     loader_name = str(data_cfg.get("loader", data_cfg.get("dataset_name", ""))).lower()
     debug_enabled = bool(cfg.get("debug", {}).get("enabled", False))
     use_synthetic = loader_name in {"synthetic", "debug", "smoke"} or debug_enabled
-    if not use_synthetic:
-        dataset_name = data_cfg.get("dataset_name") or ",".join(str(d.get("name", "")) for d in data_cfg.get("datasets", []))
-        raise NotImplementedError(
-            "Real EchoNet/CAMUS dataloaders are not wired into train_rmae.py yet. "
-            f"Requested dataset={dataset_name!r}, split={split!r}. "
-            "Use --debug or set data.loader: synthetic only for smoke tests; "
-            "otherwise implement a dataset that returns {'video': Tensor[B,T,1,112,112]}."
-        )
-    length = int(data_cfg.get(f"synthetic_{split}_samples", max(8, batch_size * max(1, max_steps or 20))))
-    dataset = SyntheticEchoVideoDataset(length=length, frames=frames, img_size=img_size, in_chans=in_chans)
+    if use_synthetic:
+        length = int(data_cfg.get(f"synthetic_{split}_samples", max(8, batch_size * max(1, max_steps or 20))))
+        dataset = SyntheticEchoVideoDataset(length=length, frames=frames, img_size=img_size, in_chans=in_chans)
+    else:
+        dataset = build_rmae_dataset(data_cfg, model_cfg, split, seed=int(cfg.get("experiment", {}).get("seed", 42)))
     augment_cfg = cfg.get("augment", {})
     if split == "train" and bool(augment_cfg.get("enabled", False)):
         dataset = AugmentedVideoDataset(dataset, EchoVideoAugmenter(augment_cfg, img_size=img_size, channels=in_chans))
@@ -298,6 +291,9 @@ def main() -> int:
     train_loader = build_loader(cfg, "train", max_steps)
     val_interval = cfg.get("train", {}).get("val_interval", None)
     val_loader = build_loader(cfg, "val", max_steps) if val_interval is not None else None
+    logger.info("train_loader samples=%d batches=%d", len(train_loader.dataset), len(train_loader))
+    if val_loader is not None:
+        logger.info("val_loader samples=%d batches=%d", len(val_loader.dataset), len(val_loader))
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=max(1, len(train_loader)))
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and bool(cfg.get("train", {}).get("mixed_precision", True)))
     start_epoch = 1

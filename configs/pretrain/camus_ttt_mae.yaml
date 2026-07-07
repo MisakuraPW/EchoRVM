@@ -5,6 +5,7 @@ experiment:
   output_root: /root/autodl-tmp/outputs
 
 data:
+  loader: camus
   dataset_name: CAMUS
   data_root: /root/autodl-tmp/datasets/CAMUS
   train_split: train

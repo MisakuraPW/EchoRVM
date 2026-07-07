@@ -10,7 +10,7 @@
 {"video": Tensor[B, T, 1, 112, 112]}
 ```
 
-真实 EchoNet/CAMUS loader 尚未接入时，`trainers/train_rmae.py` 会使用 synthetic video batch 跑通模型、优化器、日志、checkpoint、loss 曲线和 resume 流程。
+`trainers/train_rmae.py` 的正式配置会读取真实 EchoNet/CAMUS 数据。synthetic video batch 只用于 debug smoke test，用来验证模型、优化器、日志、checkpoint、loss 曲线和 resume 流程。
 
 ## 2. 模型结构
 
@@ -387,7 +387,7 @@ drop_last=true
 ## 8. 当前限制
 
 ```text
-真实 EchoNet/CAMUS loader 尚未接入
+真实 EchoRisk loader 尚未接入
 EchoRisk、多数据集联合预训练未接入
 下游 EF/分割/风险 head 未接入
 future reconstruction/future latent prediction 有接口但默认关闭
@@ -407,7 +407,7 @@ from echo_aug_validation.augment_recipes import augment_video, augment_image_mas
 
 训练入口中新增了 `utils/augmentation.py`，会把 dataset 返回的单个 clip 从 `[T,1,H,W]` tensor 转成增强代码需要的 `[T,H,W,C]`，增强后再转回 `[T,1,112,112]`。增强只在 `train` split 启用，`val` split 不增强。
 
-注意：`trainers/train_rmae.py` 里的 synthetic dataset 只用于 smoke test。正式 EchoNet/CAMUS dataloader 未接入前，预训练配置会直接报错，不再静默使用随机 tensor。只有 `--debug` 或 `data.loader: synthetic` 才允许跑 synthetic 数据。
+注意：`trainers/train_rmae.py` 里的 synthetic dataset 只用于 smoke test。正式 EchoNet/CAMUS 预训练配置会读取真实数据，不会静默使用随机 tensor。只有 `--debug` 或 `data.loader: synthetic` 才允许跑 synthetic 数据。
 
 默认 preset 是 `A4_tgc_zoom_speckle`：
 
