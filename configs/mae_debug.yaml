@@ -5,6 +5,7 @@ experiment:
   output_root: /root/autodl-tmp/outputs
 
 data:
+  loader: synthetic
   datasets:
     - name: EchoNet-Dynamic
       data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic

@@ -5,6 +5,7 @@ experiment:
   output_root: /root/autodl-tmp/outputs
 
 data:
+  loader: synthetic
   dataset_name: synthetic
   num_workers: 0
   pin_memory: true

@@ -92,6 +92,17 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
     frames = int(model_cfg.get("frames", 16))
     img_size = int(model_cfg.get("img_size", 112))
     in_chans = int(model_cfg.get("in_chans", 1))
+    loader_name = str(data_cfg.get("loader", data_cfg.get("dataset_name", ""))).lower()
+    debug_enabled = bool(cfg.get("debug", {}).get("enabled", False))
+    use_synthetic = loader_name in {"synthetic", "debug", "smoke"} or debug_enabled
+    if not use_synthetic:
+        dataset_name = data_cfg.get("dataset_name") or ",".join(str(d.get("name", "")) for d in data_cfg.get("datasets", []))
+        raise NotImplementedError(
+            "Real EchoNet/CAMUS dataloaders are not wired into train_rmae.py yet. "
+            f"Requested dataset={dataset_name!r}, split={split!r}. "
+            "Use --debug or set data.loader: synthetic only for smoke tests; "
+            "otherwise implement a dataset that returns {'video': Tensor[B,T,1,112,112]}."
+        )
     length = int(data_cfg.get(f"synthetic_{split}_samples", max(8, batch_size * max(1, max_steps or 20))))
     dataset = SyntheticEchoVideoDataset(length=length, frames=frames, img_size=img_size, in_chans=in_chans)
     augment_cfg = cfg.get("augment", {})

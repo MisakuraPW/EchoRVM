@@ -407,6 +407,8 @@ from echo_aug_validation.augment_recipes import augment_video, augment_image_mas
 
 训练入口中新增了 `utils/augmentation.py`，会把 dataset 返回的单个 clip 从 `[T,1,H,W]` tensor 转成增强代码需要的 `[T,H,W,C]`，增强后再转回 `[T,1,112,112]`。增强只在 `train` split 启用，`val` split 不增强。
 
+注意：`trainers/train_rmae.py` 里的 synthetic dataset 只用于 smoke test。正式 EchoNet/CAMUS dataloader 未接入前，预训练配置会直接报错，不再静默使用随机 tensor。只有 `--debug` 或 `data.loader: synthetic` 才允许跑 synthetic 数据。
+
 默认 preset 是 `A4_tgc_zoom_speckle`：
 
 ```yaml
