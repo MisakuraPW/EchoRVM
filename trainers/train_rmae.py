@@ -181,6 +181,9 @@ def run_epoch(
         data_time = time.perf_counter() - last_time
         data_meter.update(data_time)
         batch = move_batch(batch, device)
+        if step == 1:
+            source = batch.get("dataset", "unknown")
+            logger.info("%s first_batch video_shape=%s dataset=%s", "train" if train else "val", tuple(batch["video"].shape), source)
         start = now()
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):

@@ -18,14 +18,24 @@ from echo_aug_validation.io_utils import (
     read_medical_image,
     read_video,
     sample_frames,
-    to_grayscale,
 )
 
 
 def _as_video_tensor(video: np.ndarray, frames: int, img_size: int) -> torch.Tensor:
     video = sample_frames(video, frames)
     video = resize_with_pad(video, img_size)
-    gray = normalize_float(to_grayscale(video))
+    if video.ndim == 4:
+        if video.shape[-1] == 1:
+            gray = video[..., 0]
+        elif video.shape[-1] in (3, 4):
+            gray = video[..., :3].mean(axis=-1)
+        else:
+            raise ValueError(f"Unsupported channel count for video shape {video.shape}")
+    elif video.ndim == 3:
+        gray = video
+    else:
+        raise ValueError(f"Unsupported video shape {video.shape}")
+    gray = normalize_float(gray)
     return torch.from_numpy(gray[:, None]).float()
 
 
