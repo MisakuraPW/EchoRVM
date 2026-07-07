@@ -52,7 +52,7 @@ model:
 
 optimizer:
   name: adamw
-  lr: 5.0e-5
+  lr: 1.0e-4
   weight_decay: 1.0e-4
 
 scheduler:
@@ -62,7 +62,7 @@ scheduler:
 
 train:
   epochs: 80
-  batch_size: 16
+  batch_size: 64
   grad_accum_steps: 1
   mixed_precision: true
   torch_compile: false
@@ -90,4 +90,3 @@ early_stopping:
   enabled: true
   patience: 20
   min_delta: 1.0e-4
-
