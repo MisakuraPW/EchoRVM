@@ -94,14 +94,42 @@ def _rasterize_echonet_trace(group: pd.DataFrame, shape: tuple[int, int]) -> np.
     required = {"X1", "Y1", "X2", "Y2"}
     if not required.issubset(group.columns):
         raise ValueError(f"VolumeTracings.csv must contain columns {sorted(required)}")
-    for _, row in group.iterrows():
-        x1 = int(round(float(row["X1"])))
-        y1 = int(round(float(row["Y1"])))
-        x2 = int(round(float(row["X2"])))
-        y2 = int(round(float(row["Y2"])))
-        p1 = (min(max(x1, 0), w - 1), min(max(y1, 0), h - 1))
-        p2 = (min(max(x2, 0), w - 1), min(max(y2, 0), h - 1))
-        cv2.line(mask, p1, p2, 1, thickness=1)
+    p1 = group[["X1", "Y1"]].to_numpy(dtype=np.float32)
+    p2 = group[["X2", "Y2"]].to_numpy(dtype=np.float32)
+    if len(p1) < 2:
+        return mask
+
+    # EchoNet traces are paired boundary points across the LV. Convert the two
+    # point sets into a closed contour; drawing only the chords can leave a
+    # sparse, disconnected target that caps Dice far below a true LV mask.
+    chord = p2 - p1
+    ref = chord[np.argmax(np.linalg.norm(chord, axis=1))]
+    if float(np.linalg.norm(ref)) > 0:
+        flip = (chord @ ref) < 0
+        p1_flipped = p1.copy()
+        p2_flipped = p2.copy()
+        p1_flipped[flip], p2_flipped[flip] = p2[flip], p1[flip]
+        p1, p2 = p1_flipped, p2_flipped
+
+    centers = 0.5 * (p1 + p2)
+    centered = centers - centers.mean(axis=0, keepdims=True)
+    try:
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        axis = vh[0]
+    except np.linalg.LinAlgError:
+        axis = np.array([0.0, 1.0], dtype=np.float32)
+    order = np.argsort(centered @ axis)
+    contour = np.concatenate([p1[order], p2[order][::-1]], axis=0)
+    contour[:, 0] = np.clip(contour[:, 0], 0, w - 1)
+    contour[:, 1] = np.clip(contour[:, 1], 0, h - 1)
+    cv2.fillPoly(mask, [np.rint(contour).astype(np.int32)], 1)
+
+    for a, b in zip(p1, p2):
+        x1, y1 = np.rint(a).astype(np.int32)
+        x2, y2 = np.rint(b).astype(np.int32)
+        pt1 = (int(np.clip(x1, 0, w - 1)), int(np.clip(y1, 0, h - 1)))
+        pt2 = (int(np.clip(x2, 0, w - 1)), int(np.clip(y2, 0, h - 1)))
+        cv2.line(mask, pt1, pt2, 1, thickness=1)
     return _fill_trace_mask(mask)
 
 

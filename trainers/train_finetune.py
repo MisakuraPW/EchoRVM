@@ -289,6 +289,15 @@ def move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     return {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
 
 
+def compact_preview(value: Any, max_items: int = 3) -> Any:
+    if isinstance(value, (list, tuple)):
+        preview = list(value[:max_items])
+        if len(value) > max_items:
+            preview.append(f"...(+{len(value) - max_items})")
+        return preview
+    return value
+
+
 def compute_loss_and_metrics(model, batch, task: str, cfg: dict[str, Any]) -> tuple[torch.Tensor, dict[str, float], int, tuple[torch.Tensor, torch.Tensor] | None]:
     if task in {"echonet_seg", "camus_seg"}:
         num_classes = int(cfg.get("model", {}).get("num_classes", 2))
@@ -346,7 +355,13 @@ def run_epoch(
         batch = move_batch(batch, device)
         if step == 1:
             shape_key = "video" if "video" in batch else "image"
-            logger.info("%s first_batch %s_shape=%s source=%s", "train" if train else "val", shape_key, tuple(batch[shape_key].shape), batch.get("source_path", ""))
+            logger.info(
+                "%s first_batch %s_shape=%s source=%s",
+                "train" if train else "val",
+                shape_key,
+                tuple(batch[shape_key].shape),
+                compact_preview(batch.get("source_path", "")),
+            )
         fwd_start = now()
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
