@@ -80,18 +80,18 @@ def sample_frames(video: np.ndarray, num_frames: int) -> np.ndarray:
 def find_echonet_video(root: Path, file_name: str) -> Path | None:
     stem = Path(str(file_name)).stem
     candidates = [
+        root / "video" / f"{stem}.npy",
+        root / "npy" / f"{stem}.npy",
+        root / f"{stem}.npy",
         root / "Videos" / f"{stem}.avi",
         root / "videos" / f"{stem}.avi",
         root / "a4c-video-dir" / f"{stem}.avi",
-        root / "video" / f"{stem}.npy",
-        root / "npy" / f"{stem}.npy",
         root / f"{stem}.avi",
-        root / f"{stem}.npy",
     ]
     for path in candidates:
         if path.exists():
             return path
-    matches = list(root.rglob(f"{stem}.avi")) + list(root.rglob(f"{stem}.npy"))
+    matches = list(root.rglob(f"{stem}.npy")) + list(root.rglob(f"{stem}.avi"))
     return matches[0] if matches else None
 
 

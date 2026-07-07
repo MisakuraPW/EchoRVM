@@ -80,7 +80,7 @@ class EchoNetRMAEDataset(Dataset):
         if path is None:
             raise FileNotFoundError(f"Cannot find EchoNet video for {file_name!r} under {self.root}")
         video = _as_video_tensor(read_video(path), self.frames, self.img_size)
-        return {"video": video, "id": file_name, "dataset": "echonet"}
+        return {"video": video, "id": file_name, "dataset": "echonet", "source_path": str(path)}
 
 
 class CAMUSRMAEDataset(Dataset):
@@ -119,7 +119,7 @@ class CAMUSRMAEDataset(Dataset):
         row = self.rows[index]
         image = np.squeeze(read_medical_image(Path(row["image"])))
         video = _as_video_tensor(image[None], self.frames, self.img_size)
-        return {"video": video, "id": row["image"], "dataset": "camus"}
+        return {"video": video, "id": row["image"], "dataset": "camus", "source_path": row["image"]}
 
 
 def build_rmae_dataset(data_cfg: dict[str, Any], model_cfg: dict[str, Any], split: str, seed: int = 42) -> Dataset:

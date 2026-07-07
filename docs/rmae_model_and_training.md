@@ -109,6 +109,23 @@ bash scripts/run_debug.sh
 
 ### EchoNet RVM-MAE
 
+建议先把 EchoNet 的 `.avi` 解码缓存成 `.npy` 到 `/root/autodl-tmp`，正式训练会优先读 `npy/*.npy`：
+
+```bash
+bash scripts/cache_echonet_npy.sh
+```
+
+等价完整命令：
+
+```bash
+python tools/cache_echonet_npy.py \
+  --input-root /root/autodl-fs/datasets/EchoNet-Dynamic \
+  --output-root /root/autodl-tmp/datasets/EchoNet-Dynamic \
+  --num-workers 8
+```
+
+这个缓存脚本只做解码缓存，不做离线增强；A4 仍在训练时在线执行。
+
 ```bash
 bash scripts/run_echonet_rvm_mae.sh
 ```
