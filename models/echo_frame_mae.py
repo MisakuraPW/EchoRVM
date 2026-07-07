@@ -33,19 +33,29 @@ class FrameMAEEncoder2D(nn.Module):
     ):
         super().__init__()
         self.patch_embed = PatchEmbed2D(img_size, patch_size, in_chans, embed_dim)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+        self.background_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
         pos = get_2d_sincos_pos_embed(embed_dim, self.patch_embed.grid_size)
         self.register_buffer("pos_embed", pos, persistent=False)
         dpr = torch.linspace(0, drop_path_rate, depth).tolist()
         self.blocks = nn.ModuleList([Block(embed_dim, num_heads, mlp_ratio=mlp_ratio, drop_path=dpr[i]) for i in range(depth)])
         self.norm = nn.LayerNorm(embed_dim)
         self.apply(_init_vit_weights)
+        nn.init.normal_(self.mask_token, std=0.02)
+        nn.init.normal_(self.background_token, std=0.02)
 
     @property
     def num_patches(self) -> int:
         return self.patch_embed.num_patches
 
-    def embed(self, x: torch.Tensor) -> torch.Tensor:
+    def embed(self, x: torch.Tensor, mask: torch.Tensor | None = None, valid_mask: torch.Tensor | None = None) -> torch.Tensor:
         tokens = self.patch_embed(x)
+        if valid_mask is not None:
+            bg = self.background_token.to(device=x.device, dtype=tokens.dtype).expand_as(tokens)
+            tokens = torch.where(valid_mask.to(device=x.device).unsqueeze(-1), tokens, bg)
+        if mask is not None:
+            mask_tok = self.mask_token.to(device=x.device, dtype=tokens.dtype).expand_as(tokens)
+            tokens = torch.where(mask.to(device=x.device).unsqueeze(-1), mask_tok, tokens)
         return tokens + self.pos_embed.to(device=x.device, dtype=x.dtype)
 
     def forward_tokens(self, tokens: torch.Tensor, capture_layers: tuple[int, ...] = ()) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
@@ -160,8 +170,14 @@ class EchoFrameMAE(nn.Module):
             patch_roi = patch_roi.to(device=x.device)
         return random_mask_in_roi(patch_roi, mask_ratio), patch_roi
 
-    def encode_frames(self, frames: torch.Tensor, capture_layers: tuple[int, ...] = ()) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
-        tokens = self.encoder.embed(frames)
+    def encode_frames(
+        self,
+        frames: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        valid_mask: torch.Tensor | None = None,
+        capture_layers: tuple[int, ...] = (),
+    ) -> tuple[torch.Tensor, dict[int, torch.Tensor]]:
+        tokens = self.encoder.embed(frames, mask=mask, valid_mask=valid_mask)
         return self.encoder.forward_tokens(tokens, capture_layers=capture_layers)
 
     def decode_frames(self, state_tokens: torch.Tensor, mask: torch.Tensor, valid_mask: torch.Tensor) -> torch.Tensor:

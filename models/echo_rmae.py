@@ -57,7 +57,7 @@ class EchoRMAE(nn.Module):
             flat_roi = roi_mask.reshape(b * t, h, w)
         ratio = self.mask_ratio if mask_ratio is None else float(mask_ratio)
         mask_flat, valid_flat = self.frame_mae.make_masks(flat, ratio, flat_roi)
-        encoded_flat, _ = self.frame_mae.encode_frames(flat)
+        encoded_flat, _ = self.frame_mae.encode_frames(flat, mask=mask_flat, valid_mask=valid_flat)
         encoded = encoded_flat.reshape(b, t, self.frame_mae.num_patches, -1)
         mask = mask_flat.reshape(b, t, self.frame_mae.num_patches)
         valid = valid_flat.reshape(b, t, self.frame_mae.num_patches)

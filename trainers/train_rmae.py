@@ -107,7 +107,7 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
         "shuffle": split == "train",
         "num_workers": workers,
         "pin_memory": bool(data_cfg.get("pin_memory", torch.cuda.is_available())),
-        "drop_last": bool(data_cfg.get("drop_last", split == "train")),
+        "drop_last": bool(data_cfg.get("drop_last", False)) if split == "train" else False,
     }
     if workers > 0:
         kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", True))
@@ -174,6 +174,7 @@ def run_epoch(
     iterator = tqdm(loader, desc=f"{'train' if train else 'val'} epoch {epoch}", leave=False, disable=not cfg.get("logging", {}).get("use_tqdm", True))
     if train:
         optimizer.zero_grad(set_to_none=True)
+    expected_steps = len(loader) if max_steps is None else min(len(loader), max_steps)
     for step, batch in enumerate(iterator, start=1):
         if max_steps is not None and step > max_steps:
             break
@@ -185,12 +186,14 @@ def run_epoch(
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 out = model(batch["video"])
                 loss = out["loss"] / grad_accum
+        if bool(train_cfg.get("stop_on_nan", True)) and not torch.isfinite(out["loss"]).all():
+            raise FloatingPointError(f"Non-finite loss at epoch={epoch} step={step}: {float(out['loss'].detach().cpu())}")
         fwd_time = now() - start
         fwd_meter.update(fwd_time)
         if train:
             bwd_start = now()
             scaler.scale(loss).backward()
-            if step % grad_accum == 0:
+            if step % grad_accum == 0 or step == expected_steps:
                 if clip_grad is not None:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_grad))
@@ -294,7 +297,9 @@ def main() -> int:
     logger.info("train_loader samples=%d batches=%d", len(train_loader.dataset), len(train_loader))
     if val_loader is not None:
         logger.info("val_loader samples=%d batches=%d", len(val_loader.dataset), len(val_loader))
-    scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=max(1, len(train_loader)))
+    grad_accum = max(1, int(cfg.get("train", {}).get("grad_accum_steps", 1)))
+    optimizer_steps_per_epoch = max(1, math.ceil(len(train_loader) / grad_accum))
+    scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=optimizer_steps_per_epoch)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and bool(cfg.get("train", {}).get("mixed_precision", True)))
     start_epoch = 1
     global_step = 0
@@ -334,9 +339,16 @@ def main() -> int:
     save_every = int(ckpt_cfg.get("save_every_n_epochs", 5))
     try:
         for epoch in range(start_epoch, epochs + 1):
-            train_metrics, global_step = run_epoch(model, train_loader, optimizer, scheduler, scaler, device, cfg, epoch, global_step, True, max_steps, logger)
             val_metrics = None
-            if val_loader is not None and (epoch % int(val_interval) == 0):
+            if args.eval_only:
+                if val_loader is None:
+                    raise ValueError("--eval_only requires train.val_interval to create a validation loader")
+                with torch.no_grad():
+                    val_metrics, global_step = run_epoch(model, val_loader, optimizer, scheduler, scaler, device, cfg, epoch, global_step, False, max_steps, logger)
+                train_metrics = val_metrics
+            else:
+                train_metrics, global_step = run_epoch(model, train_loader, optimizer, scheduler, scaler, device, cfg, epoch, global_step, True, max_steps, logger)
+            if not args.eval_only and val_loader is not None and (epoch % int(val_interval) == 0):
                 with torch.no_grad():
                     val_metrics, global_step = run_epoch(model, val_loader, optimizer, scheduler, scaler, device, cfg, epoch, global_step, False, max_steps, logger)
             row = {
