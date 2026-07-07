@@ -378,16 +378,19 @@ def run_epoch(
             ef_targets.append(ef_pair[1])
         mem_alloc, mem_reserved = gpu_memory_gb()
         step_meter.update(time.perf_counter() - last_time)
-        main_metric = metrics.get("dice_mean", metrics.get("mae", 0.0))
-        iterator.set_postfix(
-            loss=f"{float(loss_raw.detach().cpu()):.4f}",
-            avg=f"{loss_meter.avg:.4f}",
-            metric=f"{main_metric:.4f}",
-            lr=f"{current_lr(optimizer):.2e}",
-            mem=f"{mem_alloc:.1f}/{mem_reserved:.1f}G",
-            data=f"{data_meter.avg:.3f}s",
-            step=f"{step_meter.avg:.3f}s",
-        )
+        postfix = {
+            "loss": f"{float(loss_raw.detach().cpu()):.4f}",
+            "avg": f"{loss_meter.avg:.4f}",
+            "lr": f"{current_lr(optimizer):.2e}",
+            "mem": f"{mem_alloc:.1f}/{mem_reserved:.1f}G",
+            "data": f"{data_meter.avg:.3f}s",
+            "step": f"{step_meter.avg:.3f}s",
+        }
+        if task in {"echonet_seg", "camus_seg"}:
+            postfix["dice"] = f"{metrics.get('dice_mean', 0.0):.4f}"
+        else:
+            postfix["mae"] = f"{metrics.get('mae', 0.0):.4f}"
+        iterator.set_postfix(**postfix)
         last_time = time.perf_counter()
     avg_metrics = {key: value / max(1, metric_weight) for key, value in metric_sums.items()}
     if ef_preds:
