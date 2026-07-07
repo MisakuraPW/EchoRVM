@@ -1,18 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG="${1:-configs/finetune_seg.yaml}"
-LOG_ROOT="/root/autodl-tmp/logs"
-mkdir -p "${LOG_ROOT}"
-LOG_FILE="${LOG_ROOT}/finetune_seg_$(date +%F_%H-%M).log"
+TASK="${TASK:-echonet_seg}"
+CONFIG="${1:-configs/finetune_echonet_seg.yaml}"
+PRETRAINED="${PRETRAINED:-}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
 
-if [[ ! -f "trainers/train_finetune.py" ]]; then
-  echo "[ERROR] trainers/train_finetune.py not found."
-  echo "Add the downstream training entry before running segmentation fine-tuning."
+if [[ -z "$PRETRAINED" ]]; then
+  echo "[ERROR] PRETRAINED=/path/to/best.pt is required for this thin wrapper."
+  echo "For the planned four-way runs use: bash scripts/run_downstream_echonet_seg.sh or bash scripts/run_downstream_camus_seg.sh"
   exit 2
 fi
 
-python trainers/train_finetune.py \
-  --task seg \
-  --config "${CONFIG}" \
-  2>&1 | tee "${LOG_FILE}"
+python trainers/train_finetune.py --task "$TASK" --config "$CONFIG" --pretrained "$PRETRAINED" "$@"

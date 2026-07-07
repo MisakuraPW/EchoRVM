@@ -23,6 +23,7 @@ conda_env/
 # Private research notes and references
 docs/*
 !docs/rmae_model_and_training.md
+!docs/downstream_finetune.md
 资料/
 
 # Logs and experiment trackers

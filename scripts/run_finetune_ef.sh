@@ -1,18 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CONFIG="${1:-configs/finetune_ef.yaml}"
-LOG_ROOT="/root/autodl-tmp/logs"
-mkdir -p "${LOG_ROOT}"
-LOG_FILE="${LOG_ROOT}/finetune_ef_$(date +%F_%H-%M).log"
+CONFIG="${1:-configs/finetune_echonet_ef.yaml}"
+PRETRAINED="${PRETRAINED:-}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
 
-if [[ ! -f "trainers/train_finetune.py" ]]; then
-  echo "[ERROR] trainers/train_finetune.py not found."
-  echo "Add the downstream training entry before running EF fine-tuning."
+if [[ -z "$PRETRAINED" ]]; then
+  echo "[ERROR] PRETRAINED=/path/to/best.pt is required for this thin wrapper."
+  echo "For the planned four-way run use: bash scripts/run_downstream_echonet_ef.sh"
   exit 2
 fi
 
-python trainers/train_finetune.py \
-  --task ef \
-  --config "${CONFIG}" \
-  2>&1 | tee "${LOG_FILE}"
+python trainers/train_finetune.py --task echonet_ef --config "$CONFIG" --pretrained "$PRETRAINED" "$@"
