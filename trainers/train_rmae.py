@@ -66,7 +66,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--max_steps", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--grad_accum_steps", type=int, default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--num_workers", type=int, default=None)
+    parser.add_argument("--prefetch_factor", type=int, default=None)
+    parser.add_argument("--data_root", default=None)
+    parser.add_argument("--frames", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
     return parser.parse_args()
+
+
+def apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    overrides: list[str] = []
+
+    def set_value(section: str, key: str, value: Any) -> None:
+        if value is None:
+            return
+        cfg.setdefault(section, {})[key] = value
+        overrides.append(f"{section}.{key}={value}")
+
+    set_value("train", "batch_size", args.batch_size)
+    set_value("train", "grad_accum_steps", args.grad_accum_steps)
+    set_value("train", "epochs", args.epochs)
+    set_value("data", "num_workers", args.num_workers)
+    set_value("data", "prefetch_factor", args.prefetch_factor)
+    set_value("model", "frames", args.frames)
+    if args.lr is not None:
+        cfg.setdefault("optimizer", {})["lr"] = args.lr
+        cfg.setdefault("optimizer", {})["muon_lr"] = args.lr
+        cfg.setdefault("optimizer", {})["adamw_lr"] = args.lr
+        overrides.append(f"optimizer.lr/muon_lr/adamw_lr={args.lr}")
+    if args.data_root is not None:
+        data_cfg = cfg.setdefault("data", {})
+        if "datasets" in data_cfg:
+            for item in data_cfg["datasets"]:
+                item["data_root"] = args.data_root
+        else:
+            data_cfg["data_root"] = args.data_root
+        overrides.append(f"data.data_root={args.data_root}")
+    return overrides
 
 
 def make_run_dir(cfg: dict[str, Any], output_dir: str | None) -> Path:
@@ -257,6 +296,7 @@ def main() -> int:
         cfg.setdefault("debug", {})["enabled"] = True
     if args.max_steps is not None:
         cfg.setdefault("train", {})["max_steps"] = args.max_steps
+    cli_overrides = apply_cli_overrides(cfg, args)
     seed_everything(int(cfg.get("experiment", {}).get("seed", 42)))
     run_dir = make_run_dir(cfg, args.output_dir)
     shutil.copy2(args.config, run_dir / "config_source.yaml")
@@ -264,6 +304,8 @@ def main() -> int:
     logger = setup_logger(run_dir / "logs" / "train.log")
     logger.info("run_dir=%s", run_dir)
     logger.info("command=%s", " ".join(sys.argv))
+    if cli_overrides:
+        logger.info("cli_overrides=%s", ", ".join(cli_overrides))
     augment_cfg = cfg.get("augment", {})
     if bool(augment_cfg.get("enabled", False)):
         aug, per_frame_random, preset = build_echo_augment_config(augment_cfg, img_size=int(cfg.get("model", {}).get("img_size", 112)))

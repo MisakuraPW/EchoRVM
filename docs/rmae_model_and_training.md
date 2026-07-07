@@ -127,7 +127,9 @@ python tools/cache_echonet_npy.py \
 这个缓存脚本只做解码缓存，不做离线增强；A4 仍在训练时在线执行。
 
 ```bash
-bash scripts/run_echonet_rvm_mae.sh
+python trainers/train_rmae.py \
+  --config configs/pretrain/echonet_rvm_mae.yaml \
+  --batch_size 20
 ```
 
 ### CAMUS RVM-MAE
@@ -146,6 +148,26 @@ bash scripts/run_echonet_ttt_mae.sh
 
 ```bash
 bash scripts/run_camus_ttt_mae.sh
+```
+
+### 四个预训练连续跑
+
+顺序是 EchoNet RVM、EchoNet TTT、CAMUS RVM、CAMUS TTT：
+
+```bash
+BATCH_SIZE=20 bash scripts/run_all_pretrain.sh
+```
+
+常用外部覆盖：
+
+```bash
+BATCH_SIZE=20 NUM_WORKERS=4 PREFETCH_FACTOR=4 bash scripts/run_all_pretrain.sh
+```
+
+临时短跑测试：
+
+```bash
+BATCH_SIZE=20 MAX_STEPS=20 bash scripts/run_all_pretrain.sh
 ```
 
 ### 指定输出目录
