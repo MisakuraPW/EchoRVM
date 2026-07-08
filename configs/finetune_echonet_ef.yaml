@@ -63,8 +63,8 @@ scheduler:
 
 train:
   epochs: 80
-  batch_size: 12
-  grad_accum_steps: 1
+  batch_size: 4
+  grad_accum_steps: 3
   mixed_precision: true
   torch_compile: false
   clip_grad_norm: 1.0

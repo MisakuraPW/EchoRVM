@@ -17,6 +17,7 @@ FRAMES="${FRAMES:-}"
 ECHO_DATA_ROOT="${ECHO_DATA_ROOT:-/root/autodl-tmp/datasets/EchoNet-Dynamic}"
 CAMUS_DATA_ROOT="${CAMUS_DATA_ROOT:-/root/autodl-tmp/datasets/CAMUS}"
 PRETRAIN_TAG="${PRETRAIN_TAG:-}"
+START_INDEX="${START_INDEX:-1}"
 
 find_best_ckpt() {
   local name="$1"
@@ -69,9 +70,15 @@ run_four_for_task() {
   local task="$1"
   local config="$2"
   local data_root="$3"
-  run_downstream_one "$task" "$config" "$data_root" "echonet_rvm_mae" "init_echonet_rvm"
-  run_downstream_one "$task" "$config" "$data_root" "echonet_ttt_mae" "init_echonet_ttt"
-  run_downstream_one "$task" "$config" "$data_root" "camus_rvm_mae" "init_camus_rvm"
-  run_downstream_one "$task" "$config" "$data_root" "camus_ttt_mae" "init_camus_ttt"
+  local names=("echonet_rvm_mae" "echonet_ttt_mae" "camus_rvm_mae" "camus_ttt_mae")
+  local labels=("init_echonet_rvm" "init_echonet_ttt" "init_camus_rvm" "init_camus_ttt")
+  local idx
+  for idx in "${!names[@]}"; do
+    local human_idx=$((idx + 1))
+    if (( human_idx < START_INDEX )); then
+      echo "========== ${task} | ${labels[$idx]} skipped by START_INDEX=${START_INDEX} =========="
+      continue
+    fi
+    run_downstream_one "$task" "$config" "$data_root" "${names[$idx]}" "${labels[$idx]}"
+  done
 }
-
