@@ -218,6 +218,37 @@ def build_loader(cfg: dict[str, Any], task: str, split: str) -> DataLoader:
     return DataLoader(dataset, **kwargs)
 
 
+def dataset_stems(dataset) -> set[str]:
+    """Best-effort video/patient ids for split leakage diagnostics."""
+
+    samples = getattr(dataset, "samples", None)
+    if samples is not None:
+        return {str(sample.get("stem", sample.get("id", ""))) for sample in samples}
+    df = getattr(dataset, "df", None)
+    if df is not None and "FileName" in df.columns:
+        return {Path(str(value)).stem for value in df["FileName"].tolist()}
+    rows = getattr(dataset, "rows", None)
+    if rows is not None:
+        out = set()
+        for row in rows:
+            value = str(row.get("image", row.get("id", "")))
+            out.add(Path(value).parent.name + "/" + Path(value).stem.split("_")[0])
+        return out
+    return set()
+
+
+def log_split_overlap(train_loader: DataLoader, val_loader: DataLoader, logger) -> None:
+    train_ids = dataset_stems(train_loader.dataset)
+    val_ids = dataset_stems(val_loader.dataset)
+    if not train_ids or not val_ids:
+        logger.info("split_overlap_check skipped train_ids=%d val_ids=%d", len(train_ids), len(val_ids))
+        return
+    overlap = sorted(train_ids & val_ids)
+    logger.info("split_overlap_check train_ids=%d val_ids=%d overlap=%d", len(train_ids), len(val_ids), len(overlap))
+    if overlap:
+        logger.warning("train/val id overlap detected examples=%s", compact_preview(overlap, max_items=10))
+
+
 def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) -> torch.nn.Module:
     model_cfg = cfg.get("model", {})
     ckpt_path = model_cfg.get("backbone_checkpoint")
@@ -360,6 +391,7 @@ def run_epoch(
     fwd_meter = AverageMeter()
     bwd_meter = AverageMeter()
     metric_sums: dict[str, float] = {}
+    count_sums: dict[str, float] = {}
     metric_weight = 0
     ef_preds = []
     ef_targets = []
@@ -406,7 +438,10 @@ def run_epoch(
             bwd_meter.update(now() - bwd_start)
         loss_meter.update(float(loss_raw.detach().cpu()), n=batch_n)
         for key, value in metrics.items():
-            metric_sums[key] = metric_sums.get(key, 0.0) + float(value) * batch_n
+            if key.startswith("_seg_"):
+                count_sums[key] = count_sums.get(key, 0.0) + float(value)
+            else:
+                metric_sums[key] = metric_sums.get(key, 0.0) + float(value) * batch_n
         metric_weight += batch_n
         if ef_pair is not None:
             ef_preds.append(ef_pair[0])
@@ -428,6 +463,18 @@ def run_epoch(
         iterator.set_postfix(**postfix)
         last_time = time.perf_counter()
     avg_metrics = {key: value / max(1, metric_weight) for key, value in metric_sums.items()}
+    if task in {"echonet_seg", "camus_seg"} and count_sums:
+        num_classes = int(cfg.get("model", {}).get("num_classes", 2))
+        global_dices = []
+        for cls in range(1, num_classes):
+            tp = count_sums.get(f"_seg_tp_class_{cls}", 0.0)
+            pred_sum = count_sums.get(f"_seg_pred_class_{cls}", 0.0)
+            target_sum = count_sums.get(f"_seg_target_class_{cls}", 0.0)
+            denom = pred_sum + target_sum
+            dice = 1.0 if denom == 0 else 2.0 * tp / denom
+            avg_metrics[f"dice_global_class_{cls}"] = float(dice)
+            global_dices.append(float(dice))
+        avg_metrics["dice_global_mean"] = float(sum(global_dices) / max(1, len(global_dices)))
     if ef_preds:
         avg_metrics.update(ef_metrics(torch.cat(ef_preds), torch.cat(ef_targets)))
     row = {
@@ -471,6 +518,7 @@ def main() -> int:
     val_loader = build_loader(cfg, task, "val")
     logger.info("train_loader samples=%d batches=%d", len(train_loader.dataset), len(train_loader))
     logger.info("val_loader samples=%d batches=%d", len(val_loader.dataset), len(val_loader))
+    log_split_overlap(train_loader, val_loader, logger)
     grad_accum = max(1, int(cfg.get("train", {}).get("grad_accum_steps", 1)))
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=max(1, math.ceil(len(train_loader) / grad_accum)))
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and bool(cfg.get("train", {}).get("mixed_precision", True)))

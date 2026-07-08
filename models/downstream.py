@@ -272,8 +272,12 @@ def segmentation_metrics(logits: torch.Tensor, target: torch.Tensor, num_classes
         p = pred == cls
         t = target == cls
         denom = p.sum().item() + t.sum().item()
+        tp = (p & t).sum().item()
         dice = 1.0 if denom == 0 else 2.0 * (p & t).sum().item() / denom
         out[f"dice_class_{cls}"] = float(dice)
+        out[f"_seg_tp_class_{cls}"] = float(tp)
+        out[f"_seg_pred_class_{cls}"] = float(p.sum().item())
+        out[f"_seg_target_class_{cls}"] = float(t.sum().item())
         dices.append(float(dice))
     out["dice_mean"] = float(sum(dices) / max(1, len(dices)))
     return out
