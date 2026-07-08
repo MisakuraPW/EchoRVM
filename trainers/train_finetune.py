@@ -177,7 +177,16 @@ def build_dataset(cfg: dict[str, Any], task: str, split: str):
             limit=limit,
         )
     if task == "echonet_seg":
-        return EchoNetSegmentationDataset(root, split_name, img_size=img_size, aug_cfg=aug, seed=seed, limit=limit)
+        return EchoNetSegmentationDataset(
+            root,
+            split_name,
+            img_size=img_size,
+            aug_cfg=aug,
+            seed=seed,
+            limit=limit,
+            frames=int(model_cfg.get("frames", 1)),
+            use_temporal_context=bool(model_cfg.get("seg_use_temporal_context", False)),
+        )
     if task == "camus_seg":
         return CAMUSSegmentationDataset(
             root,
@@ -223,7 +232,15 @@ def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) ->
         len(report["unexpected"]),
     )
     if task in {"echonet_seg", "camus_seg"}:
-        model = EchoSegFineTuner(rmae, num_classes=int(model_cfg.get("num_classes", 2)), dropout=float(model_cfg.get("head_dropout", 0.1)))
+        model = EchoSegFineTuner(
+            rmae,
+            num_classes=int(model_cfg.get("num_classes", 2)),
+            dropout=float(model_cfg.get("head_dropout", 0.1)),
+            decoder_type=str(model_cfg.get("seg_decoder", "vit_patch")),
+            decoder_embed_dim=int(model_cfg.get("decoder_embed_dim", 192)),
+            decoder_depth=int(model_cfg.get("decoder_depth", 4)),
+            decoder_num_heads=int(model_cfg.get("decoder_num_heads", 3)),
+        )
     elif task == "echonet_ef":
         model = EchoEFFineTuner(
             rmae,
@@ -301,7 +318,10 @@ def compact_preview(value: Any, max_items: int = 3) -> Any:
 def compute_loss_and_metrics(model, batch, task: str, cfg: dict[str, Any]) -> tuple[torch.Tensor, dict[str, float], int, tuple[torch.Tensor, torch.Tensor] | None]:
     if task in {"echonet_seg", "camus_seg"}:
         num_classes = int(cfg.get("model", {}).get("num_classes", 2))
-        logits = model(batch["image"])
+        if "video" in batch:
+            logits = model.forward_video(batch["video"], target_index=batch.get("target_index"))
+        else:
+            logits = model(batch["image"])
         target = batch["mask"].clamp(0, num_classes - 1)
         loss = segmentation_loss(logits, target, num_classes, dice_weight=float(cfg.get("train", {}).get("dice_weight", 1.0)))
         metrics = segmentation_metrics(logits.detach(), target.detach(), num_classes)

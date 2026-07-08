@@ -43,11 +43,17 @@ model:
   backbone_checkpoint: null
   img_size: 112
   patch_size: 8
+  frames: 1
+  seg_use_temporal_context: false
+  seg_decoder: vit_patch
   in_chans: 1
   embed_dim: 384
   depth: 12
   num_heads: 6
   core_depth: 2
+  decoder_embed_dim: 192
+  decoder_depth: 4
+  decoder_num_heads: 3
   num_classes: 4
   head_dropout: 0.10
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +12,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from augment.ultrasound import resize_with_pad
+from augment.ultrasound import EchoAugmentConfig, resize_with_pad
 from echo_aug_validation.augment_recipes import augment_image_mask, augment_video, resize_mask_with_pad
 from echo_aug_validation.io_utils import (
     camus_pairs,
@@ -68,6 +69,32 @@ def _video_to_tensor(video: np.ndarray, frames: int, img_size: int) -> torch.Ten
         gray = to_grayscale(sampled)
     gray = normalize_float(gray)
     return torch.from_numpy(gray[:, None]).float()
+
+
+def _clip_to_tensor(video: np.ndarray, img_size: int) -> torch.Tensor:
+    video = resize_with_pad(video, img_size)
+    if video.ndim == 4 and video.shape[-1] == 1:
+        gray = video[..., 0]
+    elif video.ndim == 4 and video.shape[-1] in (3, 4):
+        gray = video[..., :3].mean(axis=-1)
+    elif video.ndim == 4 and video.shape[1] in (1, 3, 4):
+        gray = video[:, :3].mean(axis=1)
+    else:
+        gray = to_grayscale(video)
+    gray = normalize_float(gray)
+    return torch.from_numpy(gray[:, None]).float()
+
+
+def _center_clip(video: np.ndarray, center: int, frames: int) -> tuple[np.ndarray, int]:
+    video = np.asarray(video)
+    t = int(video.shape[0])
+    frames = max(1, int(frames))
+    center = min(max(int(center), 0), t - 1)
+    start = center - frames // 2
+    idx = np.arange(start, start + frames)
+    idx = np.clip(idx, 0, t - 1).astype(np.int64)
+    target_index = int(np.where(idx == center)[0][0]) if np.any(idx == center) else frames // 2
+    return video[idx], target_index
 
 
 def _image_to_tensor(image: np.ndarray, img_size: int) -> torch.Tensor:
@@ -176,11 +203,15 @@ class EchoNetSegmentationDataset(Dataset):
         aug_cfg=None,
         seed: int = 0,
         limit: int | None = None,
+        frames: int = 1,
+        use_temporal_context: bool = False,
     ):
         self.root = Path(root)
         self.img_size = int(img_size)
         self.aug_cfg = aug_cfg
         self.seed = int(seed)
+        self.frames = max(1, int(frames))
+        self.use_temporal_context = bool(use_temporal_context and self.frames > 1)
         file_df = load_echonet_filelist(self.root, split)
         allowed = {_row_stem(v) for v in file_df["FileName"].tolist()}
         trace_path = self.root / "VolumeTracings.csv"
@@ -214,6 +245,24 @@ class EchoNetSegmentationDataset(Dataset):
         frame_idx = min(max(int(sample["frame"]), 0), gray_video.shape[0] - 1)
         image = gray_video[frame_idx]
         mask = _rasterize_echonet_trace(sample["trace"], image.shape[:2])
+        if self.use_temporal_context:
+            clip, target_index = _center_clip(gray_video, frame_idx, self.frames)
+            if self.aug_cfg is not None:
+                # For temporal segmentation, avoid geometric zoom unless the
+                # same transform is applied to every clip frame and the target
+                # mask. Keep A4 photometric/speckle perturbations consistent.
+                no_zoom_cfg = EchoAugmentConfig(**(asdict(self.aug_cfg) | {"zoom_prob": 0.0}))
+                clip = augment_video(clip, no_zoom_cfg, self.seed + index * 997, per_frame_random=False)
+            video_tensor = _clip_to_tensor(clip, self.img_size)
+            mask = resize_mask_with_pad(mask, self.img_size)
+            return {
+                "video": video_tensor,
+                "target_index": torch.tensor(target_index, dtype=torch.long),
+                "image": video_tensor[target_index],
+                "mask": torch.from_numpy(mask.astype(np.int64)).long(),
+                "id": f"{sample['stem']}:{frame_idx}",
+                "source_path": str(path),
+            }
         if self.aug_cfg is not None:
             image, mask = augment_image_mask(image, mask, self.aug_cfg, self.seed + index * 997, allow_zoom=True)
         else:

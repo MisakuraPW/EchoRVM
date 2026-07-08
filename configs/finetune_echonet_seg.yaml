@@ -42,11 +42,17 @@ model:
   backbone_checkpoint: null
   img_size: 112
   patch_size: 8
+  frames: 8
+  seg_use_temporal_context: true
+  seg_decoder: vit_patch
   in_chans: 1
   embed_dim: 384
   depth: 12
   num_heads: 6
   core_depth: 2
+  decoder_embed_dim: 192
+  decoder_depth: 4
+  decoder_num_heads: 3
   num_classes: 2
   head_dropout: 0.10
 
@@ -62,8 +68,8 @@ scheduler:
 
 train:
   epochs: 80
-  batch_size: 64
-  grad_accum_steps: 1
+  batch_size: 16
+  grad_accum_steps: 4
   mixed_precision: true
   torch_compile: false
   clip_grad_norm: 1.0

@@ -10,6 +10,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from .echo_rmae import EchoRMAE, build_echo_rmae
+from .patch import get_2d_sincos_pos_embed
+from .vit_blocks import Block
 
 
 def _checkpoint_model_state(ckpt: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -115,18 +117,89 @@ class PatchSegDecoder(nn.Module):
         return self.decoder(x)
 
 
+class ViTPatchSegDecoder(nn.Module):
+    """EchoCardMAE-style transformer decoder for dense patch logits."""
+
+    def __init__(
+        self,
+        encoder_dim: int,
+        num_classes: int,
+        grid_size: int,
+        patch_size: int = 8,
+        decoder_dim: int = 192,
+        depth: int = 4,
+        num_heads: int = 3,
+        mlp_ratio: float = 4.0,
+    ):
+        super().__init__()
+        self.num_classes = int(num_classes)
+        self.grid_size = int(grid_size)
+        self.patch_size = int(patch_size)
+        self.encoder_to_decoder = nn.Linear(encoder_dim, decoder_dim, bias=False)
+        pos = get_2d_sincos_pos_embed(decoder_dim, grid_size)
+        self.register_buffer("pos_embed", pos, persistent=False)
+        self.blocks = nn.ModuleList([Block(decoder_dim, num_heads, mlp_ratio=mlp_ratio) for _ in range(depth)])
+        self.norm = nn.LayerNorm(decoder_dim)
+        self.head = nn.Linear(decoder_dim, num_classes * patch_size * patch_size)
+
+    def forward(self, tokens: torch.Tensor, grid_size: int) -> torch.Tensor:
+        b, n, _ = tokens.shape
+        if grid_size != self.grid_size or n != self.grid_size * self.grid_size:
+            raise ValueError(f"Expected {self.grid_size * self.grid_size} tokens, got grid={grid_size} n={n}")
+        x = self.encoder_to_decoder(tokens) + self.pos_embed.to(device=tokens.device, dtype=tokens.dtype)
+        for block in self.blocks:
+            x = block(x)
+        x = self.head(self.norm(x))
+        p = self.patch_size
+        g = self.grid_size
+        x = x.reshape(b, g, g, p, p, self.num_classes)
+        x = x.permute(0, 5, 1, 3, 2, 4).reshape(b, self.num_classes, g * p, g * p)
+        return x
+
+
 class EchoSegFineTuner(nn.Module):
-    def __init__(self, rmae: EchoRMAE, num_classes: int, dropout: float = 0.1):
+    def __init__(
+        self,
+        rmae: EchoRMAE,
+        num_classes: int,
+        dropout: float = 0.1,
+        decoder_type: str = "vit_patch",
+        decoder_embed_dim: int = 192,
+        decoder_depth: int = 4,
+        decoder_num_heads: int = 3,
+    ):
         super().__init__()
         self.backbone = EchoRMAEBackbone(rmae)
-        self.head = PatchSegDecoder(self.backbone.embed_dim, num_classes, dropout=dropout)
+        decoder_type = decoder_type.lower()
+        if decoder_type in {"vit", "vit_patch", "echocardmae"}:
+            self.head = ViTPatchSegDecoder(
+                self.backbone.embed_dim,
+                num_classes,
+                self.backbone.grid_size,
+                patch_size=int(rmae.frame_mae.patch_size),
+                decoder_dim=decoder_embed_dim,
+                depth=decoder_depth,
+                num_heads=decoder_num_heads,
+            )
+        elif decoder_type in {"conv", "convtranspose"}:
+            self.head = PatchSegDecoder(self.backbone.embed_dim, num_classes, dropout=dropout)
+        else:
+            raise ValueError(f"Unknown segmentation decoder_type={decoder_type!r}")
 
     def forward(self, image: torch.Tensor) -> torch.Tensor:
         if image.ndim != 4:
             raise ValueError("image must have shape [B,C,H,W]")
         video = image.unsqueeze(1)
+        return self.forward_video(video)
+
+    def forward_video(self, video: torch.Tensor, target_index: torch.Tensor | None = None) -> torch.Tensor:
         features = self.backbone.forward_tokens(video)
-        tokens = features["outputs"][:, -1]
+        outputs = features["outputs"]
+        if target_index is None:
+            tokens = outputs[:, outputs.shape[1] // 2]
+        else:
+            target_index = target_index.to(device=outputs.device, dtype=torch.long).clamp(0, outputs.shape[1] - 1)
+            tokens = outputs[torch.arange(outputs.shape[0], device=outputs.device), target_index]
         return self.head(tokens, self.backbone.grid_size)
 
 

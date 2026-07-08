@@ -36,7 +36,7 @@ PRETRAIN_TAG=20260707_093341_bs16 bash scripts/run_downstream_echonet_seg.sh
 
 默认下游参数：
 
-- EchoNet segmentation: `batch_size=64`, `lr=1e-4`
+- EchoNet segmentation: `frames=8`, `batch_size=16`, `grad_accum_steps=4`, `lr=1e-4`
 - CAMUS segmentation: `batch_size=64`, `lr=1e-4`
 - EchoNet EF: `batch_size=4`, `grad_accum_steps=3`, `frames=32`, `lr=5e-5`
 
