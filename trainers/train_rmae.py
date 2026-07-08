@@ -34,6 +34,7 @@ from utils.early_stopping import EarlyStopping
 from utils.logger import setup_logger
 from utils.metrics_logger import MetricsLogger
 from utils.plotting import plot_loss_curves
+from utils.pretrained_init import load_videomae_init
 from utils.runtime import AverageMeter, gpu_memory_gb, now
 from utils.seed import seed_everything
 
@@ -74,6 +75,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data_root", default=None)
     parser.add_argument("--frames", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--init_checkpoint", default=None)
     return parser.parse_args()
 
 
@@ -92,6 +94,7 @@ def apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> list[s
     set_value("data", "num_workers", args.num_workers)
     set_value("data", "prefetch_factor", args.prefetch_factor)
     set_value("model", "frames", args.frames)
+    set_value("model", "init_checkpoint", args.init_checkpoint)
     if args.lr is not None:
         cfg.setdefault("optimizer", {})["lr"] = args.lr
         cfg.setdefault("optimizer", {})["muon_lr"] = args.lr
@@ -329,6 +332,18 @@ def main() -> int:
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision(str(cfg.get("train", {}).get("matmul_precision", "high")))
     model = build_echo_rmae(cfg.get("model", {})).to(device)
+    init_checkpoint = cfg.get("model", {}).get("init_checkpoint")
+    if init_checkpoint and not args.resume:
+        init_report = load_videomae_init(model, init_checkpoint, map_location="cpu")
+        logger.info(
+            "init_checkpoint=%s loaded_tensors=%d loaded_params=%d skipped=%d",
+            init_report["path"],
+            init_report["loaded_tensors"],
+            init_report["loaded_params"],
+            len(init_report["skipped"]),
+        )
+        if init_report["skipped"]:
+            logger.info("init_checkpoint skipped=%s", init_report["skipped"])
     if bool(cfg.get("train", {}).get("torch_compile", False)) and hasattr(torch, "compile"):
         model = torch.compile(model)
     optimizer, opt_stats = build_optimizer(model, cfg.get("optimizer", {}))

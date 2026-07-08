@@ -43,6 +43,7 @@ augment:
 model:
   name: echo_rmae
   core_type: rvm
+  init_checkpoint: ckpt/mae/videomae_vit_s.pth
   img_size: 112
   patch_size: 8
   frames: 16
