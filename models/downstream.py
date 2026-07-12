@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,8 @@ from torch import nn
 from torch.nn import functional as F
 
 from .echo_rmae import EchoRMAE, build_echo_rmae
+from .echo_single_frame_mae import EchoSingleFrameMAE, build_echo_single_frame_mae
+from hiera_echo.models import EchoHieraMAE
 from .patch import get_2d_sincos_pos_embed
 from .vit_blocks import Block
 
@@ -35,7 +38,7 @@ def load_pretrained_rmae(
     checkpoint_path: str | Path,
     fallback_model_cfg: dict[str, Any] | None = None,
     map_location: str | torch.device = "cpu",
-) -> tuple[EchoRMAE, dict[str, Any], dict[str, list[str]]]:
+) -> tuple[nn.Module, dict[str, Any], dict[str, list[str]]]:
     """Build EchoRMAE and load a pretraining checkpoint.
 
     The pretraining trainer stores the full config in the checkpoint. That is
@@ -52,21 +55,68 @@ def load_pretrained_rmae(
         saved_cfg = ckpt.get("config", {})
         if isinstance(saved_cfg, dict) and isinstance(saved_cfg.get("model"), dict):
             cfg = dict(saved_cfg["model"])
-    model = build_echo_rmae(cfg)
+    model_name = str(cfg.get("name", "echo_rmae")).lower()
+    if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
+        model = build_echo_single_frame_mae(cfg)
+    else:
+        model = build_echo_rmae(cfg)
     missing, unexpected = model.load_state_dict(_checkpoint_model_state(ckpt), strict=False)
     report = {"missing": list(missing), "unexpected": list(unexpected)}
     return model, cfg, report
 
 
+def is_hiera_checkpoint(checkpoint_path: str | Path, map_location: str | torch.device = "cpu") -> bool:
+    checkpoint_path = Path(checkpoint_path)
+    try:
+        ckpt = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(checkpoint_path, map_location=map_location)
+    if not isinstance(ckpt, dict):
+        return False
+    cfg = ckpt.get("config", {})
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    if isinstance(model_cfg, dict) and ("hiera_repo" in model_cfg or "loss_mode" in model_cfg):
+        return True
+    state = _checkpoint_model_state(ckpt)
+    return any(key.startswith("model.patch_embed.") or key.startswith("model.blocks.") for key in state)
+
+
+def load_pretrained_hiera_mae(
+    checkpoint_path: str | Path,
+    fallback_model_cfg: dict[str, Any] | None = None,
+    map_location: str | torch.device = "cpu",
+) -> tuple[EchoHieraMAE, dict[str, Any], dict[str, list[str]]]:
+    checkpoint_path = Path(checkpoint_path)
+    try:
+        ckpt = torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(checkpoint_path, map_location=map_location)
+    cfg = dict(fallback_model_cfg or {})
+    if isinstance(ckpt, dict):
+        saved_cfg = ckpt.get("config", {})
+        if isinstance(saved_cfg, dict) and isinstance(saved_cfg.get("model"), dict):
+            cfg = dict(saved_cfg["model"])
+    model = EchoHieraMAE(
+        img_size=int(cfg.get("img_size", 192)),
+        mask_ratio=float(cfg.get("mask_ratio", 0.6)),
+        loss_mode=str(cfg.get("loss_mode", "valid_weighted")),
+        hiera_repo=cfg.get("hiera_repo"),
+        init_checkpoint=None,
+    )
+    missing, unexpected = model.load_state_dict(_checkpoint_model_state(ckpt), strict=False)
+    return model, cfg, {"missing": list(missing), "unexpected": list(unexpected)}
+
+
 class EchoRMAEBackbone(nn.Module):
     """Feature extractor for downstream dense and sequence tasks."""
 
-    def __init__(self, rmae: EchoRMAE):
+    def __init__(self, rmae: EchoRMAE | EchoSingleFrameMAE):
         super().__init__()
         self.rmae = rmae
         self.embed_dim = int(rmae.frame_mae.encoder.norm.normalized_shape[0])
         self.num_patches = int(rmae.frame_mae.num_patches)
         self.grid_size = int(self.num_patches**0.5)
+        self.has_temporal_core = hasattr(rmae, "core")
 
     def forward_tokens(self, video: torch.Tensor) -> dict[str, torch.Tensor]:
         if video.ndim != 5:
@@ -75,6 +125,8 @@ class EchoRMAEBackbone(nn.Module):
         flat = video.reshape(b * t, c, h, w)
         encoded_flat, _ = self.rmae.frame_mae.encode_frames(flat, mask=None, valid_mask=None)
         encoded = encoded_flat.reshape(b, t, self.num_patches, self.embed_dim)
+        if not self.has_temporal_core:
+            return {"encoded": encoded, "outputs": encoded, "states": encoded}
         states = []
         outputs = []
         state = None
@@ -160,7 +212,7 @@ class ViTPatchSegDecoder(nn.Module):
 class EchoSegFineTuner(nn.Module):
     def __init__(
         self,
-        rmae: EchoRMAE,
+        rmae: EchoRMAE | EchoSingleFrameMAE,
         num_classes: int,
         dropout: float = 0.1,
         decoder_type: str = "vit_patch",
@@ -191,6 +243,78 @@ class EchoSegFineTuner(nn.Module):
             raise ValueError("image must have shape [B,C,H,W]")
         video = image.unsqueeze(1)
         return self.forward_video(video)
+
+    def forward_video(self, video: torch.Tensor, target_index: torch.Tensor | None = None) -> torch.Tensor:
+        features = self.backbone.forward_tokens(video)
+        outputs = features["outputs"]
+        if target_index is None:
+            tokens = outputs[:, outputs.shape[1] // 2]
+        else:
+            target_index = target_index.to(device=outputs.device, dtype=torch.long).clamp(0, outputs.shape[1] - 1)
+            tokens = outputs[torch.arange(outputs.shape[0], device=outputs.device), target_index]
+        return self.head(tokens, self.backbone.grid_size)
+
+
+class HieraBackbone(nn.Module):
+    def __init__(self, mae: EchoHieraMAE):
+        super().__init__()
+        self.mae = mae
+        self.embed_dim = int(mae.model.blocks[-1].dim_out)
+        self.grid_size = int(mae.img_size // mae.pred_stride)
+        self.patch_size = int(mae.pred_stride)
+
+    def forward_tokens(self, video: torch.Tensor) -> dict[str, torch.Tensor]:
+        if video.ndim != 5:
+            raise ValueError("video must have shape [B,T,C,H,W]")
+        from hiera.hiera import Hiera
+        from hiera.hiera_utils import undo_windowing
+
+        b, t, c, h, w = video.shape
+        flat = video.reshape(b * t, c, h, w)
+        x = self.mae._to_rgb(flat)
+        keep_mask_mu = torch.ones(
+            x.shape[0],
+            math.prod(self.mae.model.mask_spatial_shape),
+            dtype=torch.bool,
+            device=x.device,
+        )
+        _, raw_stages = Hiera.forward(self.mae.model, x, mask=keep_mask_mu, return_intermediates=True)
+        stages = []
+        for block_idx, feat in zip(self.mae.model.stage_ends, raw_stages):
+            if feat.ndim == 5:
+                _, size = self.mae.model.reroll.schedule[block_idx]
+                feat = undo_windowing(feat, size, list(feat.shape[2:-1]))
+            if feat.ndim == 4:
+                feat = feat.permute(0, 3, 1, 2).contiguous()
+            stages.append(feat)
+        fmap = stages[-1]
+        tokens = fmap.flatten(2).transpose(1, 2).reshape(b, t, self.grid_size * self.grid_size, self.embed_dim)
+        return {"outputs": tokens, "encoded": tokens, "states": tokens}
+
+
+class HieraSegFineTuner(nn.Module):
+    def __init__(
+        self,
+        mae: EchoHieraMAE,
+        num_classes: int,
+        decoder_embed_dim: int = 192,
+        decoder_depth: int = 4,
+        decoder_num_heads: int = 3,
+    ):
+        super().__init__()
+        self.backbone = HieraBackbone(mae)
+        self.head = ViTPatchSegDecoder(
+            self.backbone.embed_dim,
+            num_classes,
+            self.backbone.grid_size,
+            patch_size=self.backbone.patch_size,
+            decoder_dim=decoder_embed_dim,
+            depth=decoder_depth,
+            num_heads=decoder_num_heads,
+        )
+
+    def forward(self, image: torch.Tensor) -> torch.Tensor:
+        return self.forward_video(image.unsqueeze(1))
 
     def forward_video(self, video: torch.Tensor, target_index: torch.Tensor | None = None) -> torch.Tensor:
         features = self.backbone.forward_tokens(video)

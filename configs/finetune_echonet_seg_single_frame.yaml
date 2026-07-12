@@ -1,0 +1,86 @@
+experiment:
+  name: echonet_seg_single_frame_finetune
+  seed: 42
+  output_root: /root/autodl-tmp/outputs_downstream
+
+data:
+  dataset_name: EchoNet-Dynamic
+  data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
+  train_split: train
+  val_split: val
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  drop_last: true
+
+augment:
+  enabled: true
+  preset: A4_tgc_zoom_speckle
+  per_frame_random: false
+  img_size: 192
+  tgc_prob: 0.4
+  gamma_contrast_prob: 0.5
+  brightness_prob: 0.3
+  zoom_prob: 0.3
+  blur_prob: 0.2
+  speckle_prob: 0.4
+  shadow_prob: 0.0
+
+model:
+  backbone_checkpoint: null
+  img_size: 192
+  patch_size: 8
+  frames: 1
+  seg_use_temporal_context: false
+  seg_decoder: vit_patch
+  in_chans: 1
+  embed_dim: 384
+  depth: 12
+  num_heads: 6
+  decoder_embed_dim: 192
+  decoder_depth: 4
+  decoder_num_heads: 3
+  num_classes: 2
+  head_dropout: 0.10
+
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+
+scheduler:
+  name: cosine
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+
+train:
+  epochs: 80
+  batch_size: 32
+  grad_accum_steps: 2
+  mixed_precision: true
+  torch_compile: false
+  clip_grad_norm: 1.0
+  dice_weight: 1.0
+  plot_interval: 1
+  max_steps: null
+  freeze_backbone: false
+
+checkpoint:
+  resume: null
+  auto_resume: false
+  save_last: true
+  save_best: true
+  save_every_n_epochs: 5
+  monitor: dice_mean
+  mode: max
+
+logging:
+  use_tqdm: true
+  use_tensorboard: true
+  save_plots: true
+
+early_stopping:
+  enabled: true
+  patience: 20
+  min_delta: 1.0e-4

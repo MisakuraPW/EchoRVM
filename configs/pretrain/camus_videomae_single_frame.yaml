@@ -1,0 +1,103 @@
+experiment:
+  name: camus_videomae_single_frame
+  description: "Clean single-frame VideoMAE-initialized EchoFrameMAE pretraining on CAMUS."
+  seed: 42
+  output_root: /root/autodl-tmp/outputs
+
+data:
+  loader: camus
+  dataset_name: CAMUS
+  data_root: /root/autodl-fs/datasets/CAMUS
+  train_split: train
+  val_split: val
+  num_workers: 4
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 4
+  drop_last: true
+
+augment:
+  enabled: true
+  preset: A4_tgc_zoom_speckle
+  per_frame_random: false
+  img_size: 192
+  tgc_prob: 0.4
+  gamma_contrast_prob: 0.5
+  brightness_prob: 0.3
+  zoom_prob: 0.3
+  blur_prob: 0.2
+  speckle_prob: 0.4
+  shadow_prob: 0.0
+  tgc_min: 0.75
+  tgc_max: 1.35
+  gamma_min: 0.75
+  gamma_max: 1.35
+  contrast_min: 0.85
+  contrast_max: 1.20
+  brightness_delta: 0.08
+  zoom_min: 0.92
+  zoom_max: 1.12
+  speckle_sigma_min: 0.03
+  speckle_sigma_max: 0.10
+
+model:
+  name: echo_single_frame_mae
+  init_checkpoint: ckpt/mae/videomae_vit_s.pth
+  img_size: 192
+  patch_size: 8
+  frames: 1
+  in_chans: 1
+  embed_dim: 384
+  depth: 12
+  num_heads: 6
+  decoder_embed_dim: 192
+  decoder_depth: 4
+  decoder_num_heads: 3
+  mask_ratio: 0.6
+  drop_path_rate: 0.05
+
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 0.05
+
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+  min_lr: 1.0e-6
+
+train:
+  epochs: 100
+  batch_size: 16
+  grad_accum_steps: 4
+  mixed_precision: true
+  channels_last: false
+  torch_compile: false
+  gradient_checkpointing: false
+  clip_grad_norm: 1.0
+  log_interval: 20
+  val_interval: 1
+  plot_interval: 1
+  max_steps: null
+  stop_on_nan: true
+
+checkpoint:
+  resume: null
+  auto_resume: true
+  save_last: true
+  save_best: true
+  save_every_n_epochs: 5
+  monitor: val_loss
+  mode: min
+
+logging:
+  use_tqdm: true
+  use_tensorboard: true
+  save_jsonl: true
+  save_csv: true
+  save_plots: true
+
+early_stopping:
+  enabled: true
+  patience: 20
+  min_delta: 1.0e-4

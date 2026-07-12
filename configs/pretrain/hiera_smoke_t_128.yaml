@@ -8,7 +8,7 @@ model:
   img_size: 128
   mask_ratio: 0.6
   loss_mode: valid_weighted
-  hiera_repo: 资料/hiera
+  hiera_repo: null
   init_checkpoint: ckpt/mae/mae_hiera_tiny_224.pth
 data:
   loader: synthetic

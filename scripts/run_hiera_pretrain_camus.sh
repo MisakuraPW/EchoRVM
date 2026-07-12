@@ -8,6 +8,9 @@ EXTRA=()
 if [[ -n "$OUTPUT_DIR" ]]; then
   EXTRA+=(--output_dir "$OUTPUT_DIR")
 fi
+if [[ -n "${HIERA_REPO:-}" ]]; then
+  EXTRA+=(--hiera_repo "$HIERA_REPO")
+fi
 
 python trainers/train_hiera_mae.py \
   --config configs/pretrain/camus_hiera_t_mae.yaml \

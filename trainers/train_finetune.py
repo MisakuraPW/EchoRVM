@@ -24,7 +24,10 @@ from echo_aug_validation.augment_recipes import load_recipe
 from models.downstream import (
     EchoEFFineTuner,
     EchoSegFineTuner,
+    HieraSegFineTuner,
     ef_metrics,
+    is_hiera_checkpoint,
+    load_pretrained_hiera_mae,
     load_pretrained_rmae,
     segmentation_loss,
     segmentation_metrics,
@@ -257,6 +260,27 @@ def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) ->
     ckpt_path = model_cfg.get("backbone_checkpoint")
     if not ckpt_path:
         raise ValueError("model.backbone_checkpoint or --pretrained is required")
+    if task in {"echonet_seg", "camus_seg"} and is_hiera_checkpoint(ckpt_path, map_location=device):
+        hiera_mae, loaded_model_cfg, report = load_pretrained_hiera_mae(ckpt_path, fallback_model_cfg=model_cfg, map_location=device)
+        logger.info(
+            "loaded_pretrained=%s backbone=hiera_t missing=%d unexpected=%d",
+            ckpt_path,
+            len(report["missing"]),
+            len(report["unexpected"]),
+        )
+        model = HieraSegFineTuner(
+            hiera_mae,
+            num_classes=int(model_cfg.get("num_classes", 2)),
+            decoder_embed_dim=int(model_cfg.get("decoder_embed_dim", 192)),
+            decoder_depth=int(model_cfg.get("decoder_depth", 4)),
+            decoder_num_heads=int(model_cfg.get("decoder_num_heads", 3)),
+        )
+        if bool(cfg.get("train", {}).get("freeze_backbone", False)):
+            for name, param in model.named_parameters():
+                if name.startswith("backbone."):
+                    param.requires_grad = False
+            logger.info("hiera backbone frozen; training head only")
+        return model.to(device)
     rmae, loaded_model_cfg, report = load_pretrained_rmae(ckpt_path, fallback_model_cfg=model_cfg, map_location=device)
     logger.info(
         "loaded_pretrained=%s core_type=%s missing=%d unexpected=%d",

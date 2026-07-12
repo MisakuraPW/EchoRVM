@@ -17,7 +17,7 @@ import torch.nn.functional as F
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_HIERA_REPO = ROOT / "\u8d44\u6599" / "hiera"
+DEFAULT_HIERA_REPO = ROOT / "third_party" / "hiera"
 
 
 def ensure_hiera_importable(hiera_repo: str | Path | None = None) -> Path:
