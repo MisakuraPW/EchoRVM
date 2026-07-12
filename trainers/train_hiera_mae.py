@@ -171,7 +171,7 @@ def run_epoch(model, loader, optimizer, scheduler, scaler, device, cfg, epoch: i
         batch = move_batch(batch, device)
         t0 = time.perf_counter()
         with torch.set_grad_enabled(train):
-            with torch.cuda.amp.autocast(enabled=amp):
+            with torch.amp.autocast(device_type=device.type, enabled=amp):
                 out = model(batch["image"], batch.get("valid_mask"))
                 loss = out["loss"]
             if train:
@@ -228,7 +228,7 @@ def main() -> int:
     logger.info("train_loader samples=%d batches=%d", len(train_loader.dataset), len(train_loader))
     logger.info("val_loader samples=%d batches=%d", len(val_loader.dataset), len(val_loader))
     scheduler = build_scheduler(optimizer, cfg, len(train_loader))
-    scaler = torch.cuda.amp.GradScaler(enabled=bool(cfg.get("train", {}).get("mixed_precision", True)) and device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=bool(cfg.get("train", {}).get("mixed_precision", True)) and device.type == "cuda")
 
     start_epoch, global_step, best = 1, 0, None
     if args.resume:
@@ -241,11 +241,11 @@ def main() -> int:
     metrics = MetricsLogger(run_dir / "logs")
     early_cfg = cfg.get("early_stopping", {})
     stopper = EarlyStopping(
-        monitor=str(early_cfg.get("monitor", "val_loss")),
-        mode=str(early_cfg.get("mode", "min")),
         patience=int(early_cfg.get("patience", 20)),
         min_delta=float(early_cfg.get("min_delta", 1e-4)),
-    ) if bool(early_cfg.get("enabled", True)) else None
+        mode=str(early_cfg.get("mode", "min")),
+        enabled=bool(early_cfg.get("enabled", True)),
+    )
 
     try:
         for epoch in range(start_epoch, int(cfg.get("train", {}).get("epochs", 100)) + 1):
@@ -276,7 +276,7 @@ def main() -> int:
                 plot_loss_curves(run_dir / "logs" / "metrics.csv", run_dir / "plots" / "loss_latest.png")
             except Exception as exc:
                 logger.warning("plot failed: %s", exc)
-            if stopper is not None and stopper.step({"val_loss": metric}):
+            if stopper.step(metric):
                 logger.info("early stopping at epoch=%d best=%s", epoch, best)
                 break
     except KeyboardInterrupt:
