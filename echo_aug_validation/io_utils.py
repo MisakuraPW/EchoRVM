@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -106,8 +107,132 @@ def load_echonet_filelist(root: Path, split: str = "TRAIN") -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+_CAMUS_SPLIT_ALIASES = {
+    "train": {"train", "training", "tr"},
+    "val": {"val", "valid", "validation", "dev"},
+    "test": {"test", "testing", "te"},
+}
+
+
+def _canonical_camus_split(split: str) -> str:
+    split_l = str(split).lower()
+    for canonical, aliases in _CAMUS_SPLIT_ALIASES.items():
+        if split_l in aliases:
+            return canonical
+    return split_l
+
+
+def _strip_medical_suffix(name: str) -> str:
+    lower = name.lower()
+    if lower.endswith(".nii.gz"):
+        return name[:-7]
+    return Path(name).stem
+
+
+def _camus_patient_id(path: Path) -> str:
+    text = f"{path.parent.name}_{path.name}".lower()
+    match = re.search(r"patient[_-]?(\d+)", text)
+    if match:
+        return f"patient{int(match.group(1)):04d}"
+    stem = _strip_medical_suffix(path.name).lower()
+    for tag in ("_2ch", "_4ch", "_ed", "_es"):
+        if tag in stem:
+            stem = stem.split(tag)[0]
+    return stem
+
+
+def _normalise_camus_patient_token(value: str) -> str | None:
+    token = str(value).strip().lower()
+    if not token:
+        return None
+    match = re.search(r"patient[_-]?(\d+)", token)
+    if match:
+        return f"patient{int(match.group(1)):04d}"
+    if re.fullmatch(r"\d{1,4}", token):
+        return f"patient{int(token):04d}"
+    return None
+
+
+def _camus_view_and_frame(path: Path) -> tuple[str, str]:
+    name = _strip_medical_suffix(path.name).lower()
+    view = "2CH" if "2ch" in name else "4CH" if "4ch" in name else ""
+    frame = "ED" if "_ed" in name else "ES" if "_es" in name else ""
+    return view, frame
+
+
+def _extract_patient_ids(text: str) -> set[str]:
+    ids = set()
+    for match in re.finditer(r"patient[_-]?(\d+)", text.lower()):
+        ids.add(f"patient{int(match.group(1)):04d}")
+    for token in re.split(r"[\s,;]+", text):
+        patient = _normalise_camus_patient_token(token)
+        if patient:
+            ids.add(patient)
+    return ids
+
+
+def _load_camus_split_ids(root: Path, split: str) -> set[str] | None:
+    split_dir = root / "database_split"
+    if not split_dir.exists():
+        return None
+    canonical = _canonical_camus_split(split)
+    aliases = _CAMUS_SPLIT_ALIASES.get(canonical, {canonical})
+    ids: set[str] = set()
+
+    # Common layouts: train.txt / validation.csv / testing.json, or nested dirs.
+    files = [p for p in split_dir.rglob("*") if p.is_file()]
+    named_files = [
+        p for p in files
+        if any(alias in p.stem.lower() or alias in str(p.parent.name).lower() for alias in aliases)
+    ]
+    for path in named_files:
+        try:
+            ids.update(_extract_patient_ids(path.read_text(encoding="utf-8", errors="ignore")))
+        except Exception:
+            continue
+    if ids:
+        return ids
+
+    # Fallback for a single CSV/TSV table with split and patient columns.
+    for path in files:
+        if path.suffix.lower() not in {".csv", ".tsv", ".txt"}:
+            continue
+        try:
+            sep = "\t" if path.suffix.lower() == ".tsv" else None
+            df = pd.read_csv(path, sep=sep, engine="python")
+        except Exception:
+            continue
+        lower_cols = {str(col).lower(): col for col in df.columns}
+        split_col = next((lower_cols[c] for c in ("split", "set", "subset") if c in lower_cols), None)
+        id_col = next((lower_cols[c] for c in ("patient", "patient_id", "id", "name") if c in lower_cols), None)
+        if split_col is None or id_col is None:
+            continue
+        mask = df[split_col].astype(str).str.lower().isin(aliases)
+        for value in df.loc[mask, id_col].astype(str):
+            extracted = _extract_patient_ids(value)
+            patient = _normalise_camus_patient_token(value)
+            ids.update(extracted or ({patient} if patient else {_camus_patient_id(Path(value))}))
+    return ids
+
+
+def _camus_search_roots(root: Path, split: str) -> tuple[list[Path], str]:
+    split_path = root / split
+    if split_path.exists():
+        return [split_path], "directory"
+    canonical = _canonical_camus_split(split)
+    for alias in _CAMUS_SPLIT_ALIASES.get(canonical, {canonical}):
+        alias_path = root / alias
+        if alias_path.exists():
+            return [alias_path], "directory"
+    nifti = root / "database_nifti"
+    if nifti.exists():
+        return [nifti], "database_nifti"
+    return [root], "scan"
+
+
 def camus_pairs(root: Path, split: str = "training") -> list[dict[str, str]]:
-    search_roots = [root / split, root] if (root / split).exists() else [root]
+    split_ids = _load_camus_split_ids(root, split)
+    search_roots, split_source = _camus_search_roots(root, split)
     rows: list[dict[str, str]] = []
     for base in search_roots:
         for img in sorted(base.rglob("*.mhd")) + sorted(base.rglob("*.nii")) + sorted(base.rglob("*.nii.gz")):
@@ -117,13 +242,36 @@ def camus_pairs(root: Path, split: str = "training") -> list[dict[str, str]]:
                 continue
             if not any(tag in lower for tag in ("_ed", "_es")):
                 continue
+            patient = _camus_patient_id(img)
+            if split_ids is not None and patient not in split_ids:
+                continue
             if name.endswith(".nii.gz"):
                 mask = img.with_name(name[:-7] + "_gt.nii.gz")
             else:
                 mask = img.with_name(img.stem + "_gt" + img.suffix)
             if mask.exists():
-                rows.append({"image": str(img), "mask": str(mask), "dataset": "camus"})
-    return rows
+                view, frame = _camus_view_and_frame(img)
+                rows.append(
+                    {
+                        "image": str(img),
+                        "mask": str(mask),
+                        "dataset": "camus",
+                        "patient": patient,
+                        "view": view,
+                        "frame": frame,
+                        "split": _canonical_camus_split(split),
+                        "split_source": "database_split" if split_ids is not None else split_source,
+                    }
+                )
+    seen = set()
+    unique = []
+    for row in rows:
+        key = row["image"]
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
 
 
 def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:

@@ -10,7 +10,7 @@ model:
   init_checkpoint: ckpt/mae/mae_hiera_tiny_224.pth
 data:
   dataset_name: camus
-  data_root: /root/autodl-tmp/datasets/CAMUS
+  data_root: /root/autodl-fs/datasets/CAMUS
   train_split: train
   val_split: val
   source_frames: 1

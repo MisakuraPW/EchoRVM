@@ -7,7 +7,7 @@ experiment:
 data:
   loader: camus
   dataset_name: CAMUS
-  data_root: /root/autodl-tmp/datasets/CAMUS
+  data_root: /root/autodl-fs/datasets/CAMUS
   train_split: train
   val_split: val
   num_workers: 4

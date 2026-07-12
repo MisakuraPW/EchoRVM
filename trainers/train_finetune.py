@@ -231,6 +231,9 @@ def dataset_stems(dataset) -> set[str]:
     if rows is not None:
         out = set()
         for row in rows:
+            if row.get("patient"):
+                out.add(str(row["patient"]))
+                continue
             value = str(row.get("image", row.get("id", "")))
             out.add(Path(value).parent.name + "/" + Path(value).stem.split("_")[0])
         return out

@@ -12,7 +12,7 @@ data:
       enabled: true
       weight: 1.0
     - name: CAMUS
-      data_root: /root/autodl-tmp/datasets/CAMUS
+      data_root: /root/autodl-fs/datasets/CAMUS
       enabled: true
       weight: 1.0
   train_split: train

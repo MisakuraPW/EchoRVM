@@ -59,6 +59,42 @@ def _split_subset(dataset: Dataset, split: str, val_fraction: float = 0.15, seed
     raise ValueError(f"Unsupported split {split!r}")
 
 
+def _camus_patient_key(row: dict[str, str]) -> str:
+    if row.get("patient"):
+        return str(row["patient"])
+    path = Path(row["image"])
+    name = path.name.lower()
+    for tag in ("_2ch", "_4ch", "_ed", "_es"):
+        if tag in name:
+            return name.split(tag)[0]
+    return path.parent.name.lower()
+
+
+def _has_explicit_camus_split(rows: list[dict[str, str]]) -> bool:
+    return bool(rows) and any(row.get("split_source") in {"database_split", "directory"} for row in rows)
+
+
+def _split_camus_rows(rows: list[dict[str, str]], split: str, val_fraction: float, seed: int) -> list[dict[str, str]]:
+    split_l = split.lower()
+    if split_l in {"all", "full", "training"}:
+        return rows
+    keys = sorted({_camus_patient_key(row) for row in rows})
+    if not keys:
+        return rows
+    rng = np.random.default_rng(seed)
+    shuffled = np.asarray(keys, dtype=object)
+    rng.shuffle(shuffled)
+    val_n = max(1, int(round(len(shuffled) * val_fraction))) if len(shuffled) > 1 else 1
+    val_keys = set(str(x) for x in shuffled[:val_n])
+    want_val = split_l in {"val", "valid", "validation"}
+    if split_l in {"train"}:
+        want_val = False
+    elif not want_val:
+        raise ValueError(f"Unsupported CAMUS split {split!r}")
+    out = [row for row in rows if (_camus_patient_key(row) in val_keys) == want_val]
+    return out if out else rows
+
+
 class EchoNetRMAEDataset(Dataset):
     def __init__(self, root: str | Path, split: str, frames: int, img_size: int, limit: int | None = None):
         self.root = Path(root)
@@ -97,18 +133,16 @@ class CAMUSRMAEDataset(Dataset):
         self.root = Path(root)
         self.frames = int(frames)
         self.img_size = int(img_size)
-        base_split = "training"
-        rows = camus_pairs(self.root, base_split)
-        if not rows:
-            rows = camus_pairs(self.root, split)
+        rows = camus_pairs(self.root, split)
+        if not rows and split.lower() not in {"train", "training"}:
+            rows = camus_pairs(self.root, "training")
         if limit is not None:
             rows = rows[: int(limit)]
         self.rows = rows
         if len(self.rows) == 0:
             raise RuntimeError(f"No CAMUS ED/ES images found under {self.root}")
-        subset = _split_subset(self, split, val_fraction=val_fraction, seed=seed)
-        if isinstance(subset, Subset):
-            self.rows = [self.rows[i] for i in subset.indices]
+        if not _has_explicit_camus_split(self.rows):
+            self.rows = _split_camus_rows(self.rows, split, val_fraction=val_fraction, seed=seed)
         if len(self.rows) == 0:
             raise RuntimeError(f"CAMUS split {split!r} is empty under {self.root}")
 

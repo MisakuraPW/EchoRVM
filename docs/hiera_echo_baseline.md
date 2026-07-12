@@ -40,6 +40,20 @@ Or run both:
 bash scripts/run_hiera_stage1.sh
 ```
 
+For the newer CAMUS NIfTI layout, keep the dataset at:
+
+```text
+/root/autodl-fs/datasets/CAMUS/database_nifti
+/root/autodl-fs/datasets/CAMUS/database_split
+/root/autodl-fs/datasets/CAMUS/jupyter
+```
+
+Check discovery before training:
+
+```bash
+python tools/check_camus_dataset.py --root /root/autodl-fs/datasets/CAMUS
+```
+
 CLI overrides are supported:
 
 ```bash

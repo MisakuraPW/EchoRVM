@@ -31,6 +31,8 @@ def _row_stem(value: object) -> str:
 
 
 def _patient_key(row: dict[str, str]) -> str:
+    if row.get("patient"):
+        return str(row["patient"])
     path = Path(row["image"])
     name = path.name.lower()
     for tag in ("_2ch", "_4ch", "_ed", "_es"):
@@ -54,6 +56,10 @@ def _split_rows(rows: list[dict[str, str]], split: str, val_fraction: float, see
     want_val = split_l in {"val", "valid", "validation"}
     out = [row for row in rows if (_patient_key(row) in val_keys) == want_val]
     return out if out else rows
+
+
+def _has_explicit_camus_split(rows: list[dict[str, str]]) -> bool:
+    return bool(rows) and any(row.get("split_source") in {"database_split", "directory"} for row in rows)
 
 
 def _video_to_tensor(video: np.ndarray, frames: int, img_size: int) -> torch.Tensor:
@@ -294,10 +300,11 @@ class CAMUSSegmentationDataset(Dataset):
         self.img_size = int(img_size)
         self.aug_cfg = aug_cfg
         self.seed = int(seed)
-        rows = camus_pairs(self.root, "training")
-        if not rows:
-            rows = camus_pairs(self.root, split)
-        rows = _split_rows(rows, split, val_fraction=val_fraction, seed=seed)
+        rows = camus_pairs(self.root, split)
+        if not rows and split.lower() not in {"train", "training"}:
+            rows = camus_pairs(self.root, "training")
+        if not _has_explicit_camus_split(rows):
+            rows = _split_rows(rows, split, val_fraction=val_fraction, seed=seed)
         if limit is not None:
             rows = rows[: int(limit)]
         if not rows:

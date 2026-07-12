@@ -15,7 +15,7 @@ PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 MAX_STEPS="${MAX_STEPS:-}"
 FRAMES="${FRAMES:-}"
 ECHO_DATA_ROOT="${ECHO_DATA_ROOT:-/root/autodl-tmp/datasets/EchoNet-Dynamic}"
-CAMUS_DATA_ROOT="${CAMUS_DATA_ROOT:-/root/autodl-tmp/datasets/CAMUS}"
+CAMUS_DATA_ROOT="${CAMUS_DATA_ROOT:-/root/autodl-fs/datasets/CAMUS}"
 PRETRAIN_TAG="${PRETRAIN_TAG:-}"
 START_INDEX="${START_INDEX:-1}"
 

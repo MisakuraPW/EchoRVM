@@ -6,7 +6,7 @@ DOWNSTREAM_ROOT="${DOWNSTREAM_ROOT:-/root/autodl-tmp/outputs_downstream}"
 RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 
 ECHO_DATA_ROOT="${ECHO_DATA_ROOT:-/root/autodl-tmp/datasets/EchoNet-Dynamic}"
-CAMUS_DATA_ROOT="${CAMUS_DATA_ROOT:-/root/autodl-tmp/datasets/CAMUS}"
+CAMUS_DATA_ROOT="${CAMUS_DATA_ROOT:-/root/autodl-fs/datasets/CAMUS}"
 INIT_CHECKPOINT="${INIT_CHECKPOINT:-ckpt/mae/videomae_vit_s.pth}"
 
 PRETRAIN_NUM_WORKERS="${PRETRAIN_NUM_WORKERS:-4}"

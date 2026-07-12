@@ -11,7 +11,7 @@ data:
       data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
       enabled: true
     - name: CAMUS
-      data_root: /root/autodl-tmp/datasets/CAMUS
+      data_root: /root/autodl-fs/datasets/CAMUS
       enabled: true
   train_split: train
   val_split: val
