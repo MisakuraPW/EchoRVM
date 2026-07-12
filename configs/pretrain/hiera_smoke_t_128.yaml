@@ -1,0 +1,38 @@
+experiment:
+  name: hiera_t_smoke
+  output_root: outputs
+  seed: 42
+debug:
+  enabled: true
+model:
+  img_size: 128
+  mask_ratio: 0.6
+  loss_mode: valid_weighted
+  hiera_repo: 资料/hiera
+  init_checkpoint: ckpt/mae/mae_hiera_tiny_224.pth
+data:
+  loader: synthetic
+  synthetic_train_samples: 16
+  synthetic_val_samples: 8
+  num_workers: 0
+  pin_memory: true
+  drop_last: true
+train:
+  epochs: 1
+  batch_size: 2
+  mixed_precision: true
+  clip_grad_norm: 1.0
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 0.05
+scheduler:
+  name: cosine
+  warmup_epochs: 0
+  min_lr: 1.0e-6
+early_stopping:
+  enabled: false
+checkpoint:
+  save_every: 1
+logging:
+  use_tqdm: true

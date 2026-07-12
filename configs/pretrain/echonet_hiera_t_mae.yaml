@@ -1,0 +1,58 @@
+experiment:
+  name: echonet_hiera_t_mae
+  output_root: /root/autodl-tmp/outputs
+  seed: 42
+model:
+  img_size: 192
+  mask_ratio: 0.6
+  loss_mode: valid_weighted
+  hiera_repo: 资料/hiera
+  init_checkpoint: ckpt/mae/mae_hiera_tiny_224.pth
+data:
+  dataset_name: echonet
+  data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
+  train_split: TRAIN
+  val_split: VAL
+  source_frames: 1
+  frame_policy: middle
+  num_workers: 6
+  prefetch_factor: 4
+  persistent_workers: true
+  pin_memory: true
+  drop_last: true
+augment:
+  enabled: true
+  preset: A4_tgc_zoom_speckle
+  per_frame_random: false
+  img_size: 192
+  tgc_prob: 0.4
+  gamma_contrast_prob: 0.5
+  brightness_prob: 0.3
+  zoom_prob: 0.3
+  blur_prob: 0.2
+  speckle_prob: 0.4
+  shadow_prob: 0.0
+train:
+  epochs: 100
+  batch_size: 64
+  mixed_precision: true
+  clip_grad_norm: 1.0
+optimizer:
+  name: adamw
+  lr: 1.5e-4
+  weight_decay: 0.05
+  betas: [0.9, 0.95]
+scheduler:
+  name: cosine
+  warmup_epochs: 10
+  min_lr: 1.0e-6
+early_stopping:
+  enabled: true
+  monitor: val_loss
+  mode: min
+  patience: 20
+  min_delta: 1.0e-4
+checkpoint:
+  save_every: 10
+logging:
+  use_tqdm: true
