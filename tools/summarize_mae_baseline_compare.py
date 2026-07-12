@@ -154,6 +154,38 @@ def _read_stage_times(path: Path) -> dict[str, float]:
     return out
 
 
+def _to_markdown_table(df: pd.DataFrame) -> str:
+    """Small dependency-free markdown table writer.
+
+    ``pandas.DataFrame.to_markdown`` requires the optional ``tabulate`` package,
+    which is not guaranteed to exist on the AutoDL image.  Keep the experiment
+    summary self-contained instead of asking the training environment to install
+    another dependency.
+    """
+
+    if df.empty:
+        return ""
+    headers = [str(col) for col in df.columns]
+    rows = []
+    for _, row in df.iterrows():
+        values = []
+        for col in df.columns:
+            value = row[col]
+            if pd.isna(value):
+                values.append("")
+            elif isinstance(value, float):
+                values.append(f"{value:.6g}")
+            else:
+                values.append(str(value))
+        rows.append(values)
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    lines.extend("| " + " | ".join(values) + " |" for values in rows)
+    return "\n".join(lines) + "\n"
+
+
 def _row(kind: str, dataset: str, backbone: str, task: str, run_dir: Path, label: str, stage_times: dict[str, float], device: torch.device) -> dict[str, Any]:
     ckpt = run_dir / "checkpoints" / "best.pt"
     row = {
@@ -225,7 +257,7 @@ def main() -> int:
         "best_ckpt_mb",
     ]
     cols = [c for c in cols if c in df.columns]
-    md_path.write_text(df[cols].to_markdown(index=False), encoding="utf-8")
+    md_path.write_text(_to_markdown_table(df[cols]), encoding="utf-8")
     print(f"wrote {csv_path}")
     print(f"wrote {md_path}")
     return 0
