@@ -32,6 +32,7 @@ from models.downstream import (
     segmentation_loss,
     segmentation_metrics,
 )
+from models.echocardmae_official import load_echocardmae_official_seg
 from utils.checkpoint import find_last_checkpoint, load_checkpoint, save_checkpoint
 from utils.config import load_config, resolve_output_root, save_config
 from utils.downstream_datasets import CAMUSSegmentationDataset, EchoNetEFDataset, EchoNetSegmentationDataset
@@ -260,6 +261,27 @@ def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) ->
     ckpt_path = model_cfg.get("backbone_checkpoint")
     if not ckpt_path:
         raise ValueError("model.backbone_checkpoint or --pretrained is required")
+    backbone_type = str(model_cfg.get("backbone_type", "")).lower()
+    if backbone_type in {"echocardmae", "echocardmae_official", "official_echocardmae"}:
+        if task not in {"echonet_seg", "camus_seg"}:
+            raise ValueError("EchoCardMAE official fine-tuner currently supports segmentation tasks only")
+        model, report = load_echocardmae_official_seg(ckpt_path, model_cfg, map_location=device)
+        logger.info(
+            "loaded_pretrained=%s backbone=echocardmae_official loaded=%d skipped_shape=%d missing=%d unexpected=%d",
+            ckpt_path,
+            len(report["loaded"]),
+            len(report["skipped_shape"]),
+            len(report["missing"]),
+            len(report["unexpected"]),
+        )
+        if report["skipped_shape"]:
+            logger.info("echocardmae skipped_shape=%s", compact_preview(report["skipped_shape"], max_items=20))
+        if bool(cfg.get("train", {}).get("freeze_backbone", False)):
+            for name, param in model.named_parameters():
+                if name.startswith("encoder."):
+                    param.requires_grad = False
+            logger.info("EchoCardMAE encoder frozen; training decoder/head only")
+        return model.to(device)
     if task in {"echonet_seg", "camus_seg"} and is_hiera_checkpoint(ckpt_path, map_location=device):
         hiera_mae, loaded_model_cfg, report = load_pretrained_hiera_mae(ckpt_path, fallback_model_cfg=model_cfg, map_location=device)
         logger.info(
