@@ -20,9 +20,13 @@ def _checkpoint_state(ckpt: Any) -> dict[str, torch.Tensor]:
 
 
 def _strip_prefix(key: str) -> str:
-    for prefix in ("module.", "backbone.", "model."):
-        if key.startswith(prefix):
-            return key[len(prefix) :]
+    changed = True
+    while changed:
+        changed = False
+        for prefix in ("module.", "backbone.", "model."):
+            if key.startswith(prefix):
+                key = key[len(prefix) :]
+                changed = True
     return key
 
 
@@ -68,6 +72,7 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
     skipped: dict[str, str] = {}
 
     aliases = [
+        # EchoCardMAE / VideoMAE-style checkpoints.
         ("encoder.patch_embed.proj.weight", "frame_mae.encoder.patch_embed.proj.weight"),
         ("encoder.patch_embed.proj.bias", "frame_mae.encoder.patch_embed.proj.bias"),
         ("encoder.norm.weight", "frame_mae.encoder.norm.weight"),
@@ -77,6 +82,17 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
         ("background_token", "frame_mae.decoder.background_token"),
         ("decoder.norm.weight", "frame_mae.decoder.norm.weight"),
         ("decoder.norm.bias", "frame_mae.decoder.norm.bias"),
+        # Official image MAE checkpoints, e.g. mae_pretrain_vit_base.pth.
+        ("patch_embed.proj.weight", "frame_mae.encoder.patch_embed.proj.weight"),
+        ("patch_embed.proj.bias", "frame_mae.encoder.patch_embed.proj.bias"),
+        ("norm.weight", "frame_mae.encoder.norm.weight"),
+        ("norm.bias", "frame_mae.encoder.norm.bias"),
+        ("decoder_embed.weight", "frame_mae.decoder.encoder_to_decoder.weight"),
+        ("mask_token", "frame_mae.decoder.mask_token"),
+        ("decoder_norm.weight", "frame_mae.decoder.norm.weight"),
+        ("decoder_norm.bias", "frame_mae.decoder.norm.bias"),
+        ("decoder_pred.weight", "frame_mae.decoder.head.weight"),
+        ("decoder_pred.bias", "frame_mae.decoder.head.bias"),
     ]
     for i in range(len(getattr(model.frame_mae.encoder, "blocks", []))):
         aliases.extend(
@@ -93,6 +109,18 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
                 (f"encoder.blocks.{i}.mlp.fc1.bias", f"frame_mae.encoder.blocks.{i}.mlp.fc1.bias"),
                 (f"encoder.blocks.{i}.mlp.fc2.weight", f"frame_mae.encoder.blocks.{i}.mlp.fc2.weight"),
                 (f"encoder.blocks.{i}.mlp.fc2.bias", f"frame_mae.encoder.blocks.{i}.mlp.fc2.bias"),
+                (f"blocks.{i}.norm1.weight", f"frame_mae.encoder.blocks.{i}.norm1.weight"),
+                (f"blocks.{i}.norm1.bias", f"frame_mae.encoder.blocks.{i}.norm1.bias"),
+                (f"blocks.{i}.attn.qkv.weight", f"frame_mae.encoder.blocks.{i}.attn.qkv.weight"),
+                (f"blocks.{i}.attn.qkv.bias", f"frame_mae.encoder.blocks.{i}.attn.qkv.bias"),
+                (f"blocks.{i}.attn.proj.weight", f"frame_mae.encoder.blocks.{i}.attn.proj.weight"),
+                (f"blocks.{i}.attn.proj.bias", f"frame_mae.encoder.blocks.{i}.attn.proj.bias"),
+                (f"blocks.{i}.norm2.weight", f"frame_mae.encoder.blocks.{i}.norm2.weight"),
+                (f"blocks.{i}.norm2.bias", f"frame_mae.encoder.blocks.{i}.norm2.bias"),
+                (f"blocks.{i}.mlp.fc1.weight", f"frame_mae.encoder.blocks.{i}.mlp.fc1.weight"),
+                (f"blocks.{i}.mlp.fc1.bias", f"frame_mae.encoder.blocks.{i}.mlp.fc1.bias"),
+                (f"blocks.{i}.mlp.fc2.weight", f"frame_mae.encoder.blocks.{i}.mlp.fc2.weight"),
+                (f"blocks.{i}.mlp.fc2.bias", f"frame_mae.encoder.blocks.{i}.mlp.fc2.bias"),
             ]
         )
     for i in range(len(getattr(model.frame_mae.decoder, "blocks", []))):
@@ -110,6 +138,18 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
                 (f"decoder.blocks.{i}.mlp.fc1.bias", f"frame_mae.decoder.blocks.{i}.mlp.fc1.bias"),
                 (f"decoder.blocks.{i}.mlp.fc2.weight", f"frame_mae.decoder.blocks.{i}.mlp.fc2.weight"),
                 (f"decoder.blocks.{i}.mlp.fc2.bias", f"frame_mae.decoder.blocks.{i}.mlp.fc2.bias"),
+                (f"decoder_blocks.{i}.norm1.weight", f"frame_mae.decoder.blocks.{i}.norm1.weight"),
+                (f"decoder_blocks.{i}.norm1.bias", f"frame_mae.decoder.blocks.{i}.norm1.bias"),
+                (f"decoder_blocks.{i}.attn.qkv.weight", f"frame_mae.decoder.blocks.{i}.attn.qkv.weight"),
+                (f"decoder_blocks.{i}.attn.qkv.bias", f"frame_mae.decoder.blocks.{i}.attn.qkv.bias"),
+                (f"decoder_blocks.{i}.attn.proj.weight", f"frame_mae.decoder.blocks.{i}.attn.proj.weight"),
+                (f"decoder_blocks.{i}.attn.proj.bias", f"frame_mae.decoder.blocks.{i}.attn.proj.bias"),
+                (f"decoder_blocks.{i}.norm2.weight", f"frame_mae.decoder.blocks.{i}.norm2.weight"),
+                (f"decoder_blocks.{i}.norm2.bias", f"frame_mae.decoder.blocks.{i}.norm2.bias"),
+                (f"decoder_blocks.{i}.mlp.fc1.weight", f"frame_mae.decoder.blocks.{i}.mlp.fc1.weight"),
+                (f"decoder_blocks.{i}.mlp.fc1.bias", f"frame_mae.decoder.blocks.{i}.mlp.fc1.bias"),
+                (f"decoder_blocks.{i}.mlp.fc2.weight", f"frame_mae.decoder.blocks.{i}.mlp.fc2.weight"),
+                (f"decoder_blocks.{i}.mlp.fc2.bias", f"frame_mae.decoder.blocks.{i}.mlp.fc2.bias"),
             ]
         )
 

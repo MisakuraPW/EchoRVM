@@ -10,6 +10,7 @@ ECHO_DATA_ROOT="${ECHO_DATA_ROOT:-/root/autodl-tmp/datasets/EchoNet-Dynamic}"
 CAMUS_DATA_ROOT="${CAMUS_DATA_ROOT:-/root/autodl-fs/datasets/CAMUS}"
 VIDEO_INIT_CHECKPOINT="${VIDEO_INIT_CHECKPOINT:-ckpt/mae/videomae_vit_s.pth}"
 HIERA_INIT_CHECKPOINT="${HIERA_INIT_CHECKPOINT:-ckpt/mae/mae_hiera_tiny_224.pth}"
+IMAGE_INIT_CHECKPOINT="${IMAGE_INIT_CHECKPOINT:-ckpt/mae/mae_pretrain_vit_base.pth}"
 HIERA_REPO="${HIERA_REPO:-}"
 
 PRETRAIN_NUM_WORKERS="${PRETRAIN_NUM_WORKERS:-4}"
@@ -40,6 +41,16 @@ append_video_pretrain_args() {
   if [[ -n "${VIDEO_PRETRAIN_BATCH_SIZE:-${PRETRAIN_BATCH_SIZE:-}}" ]]; then arr+=(--batch_size "${VIDEO_PRETRAIN_BATCH_SIZE:-${PRETRAIN_BATCH_SIZE}}"); fi
   if [[ -n "${PRETRAIN_EPOCHS:-}" ]]; then arr+=(--epochs "$PRETRAIN_EPOCHS"); fi
   if [[ -n "${VIDEO_PRETRAIN_LR:-${PRETRAIN_LR:-}}" ]]; then arr+=(--lr "${VIDEO_PRETRAIN_LR:-${PRETRAIN_LR}}"); fi
+  if [[ -n "${PRETRAIN_MAX_STEPS:-}" ]]; then arr+=(--max_steps "$PRETRAIN_MAX_STEPS"); fi
+}
+
+append_image_pretrain_args() {
+  local -n arr="$1"
+  arr+=(--num_workers "$PRETRAIN_NUM_WORKERS" --prefetch_factor "$PRETRAIN_PREFETCH_FACTOR")
+  arr+=(--init_checkpoint "$IMAGE_INIT_CHECKPOINT")
+  if [[ -n "${IMAGE_PRETRAIN_BATCH_SIZE:-${PRETRAIN_BATCH_SIZE:-}}" ]]; then arr+=(--batch_size "${IMAGE_PRETRAIN_BATCH_SIZE:-${PRETRAIN_BATCH_SIZE}}"); fi
+  if [[ -n "${PRETRAIN_EPOCHS:-}" ]]; then arr+=(--epochs "$PRETRAIN_EPOCHS"); fi
+  if [[ -n "${IMAGE_PRETRAIN_LR:-${PRETRAIN_LR:-}}" ]]; then arr+=(--lr "${IMAGE_PRETRAIN_LR:-${PRETRAIN_LR}}"); fi
   if [[ -n "${PRETRAIN_MAX_STEPS:-}" ]]; then arr+=(--max_steps "$PRETRAIN_MAX_STEPS"); fi
 }
 
@@ -95,6 +106,17 @@ run_video_pretrain() {
   timed_stage "$4" "pretrain_${name}" "$out_dir" python trainers/train_rmae.py "${args[@]}"
 }
 
+run_image_pretrain() {
+  local dataset="$1"
+  local config="$2"
+  local data_root="$3"
+  local name="${dataset}_image_mae_base"
+  local out_dir="${PRETRAIN_ROOT}/${name}/${RUN_TAG}"
+  local args=(--config "$config" --data_root "$data_root" --output_dir "$out_dir")
+  append_image_pretrain_args args
+  timed_stage "$4" "pretrain_${name}" "$out_dir" python trainers/train_rmae.py "${args[@]}"
+}
+
 run_seg_finetune() {
   local dataset="$1"
   local backbone="$2"
@@ -121,11 +143,15 @@ run_hiera_pretrain "echonet" "configs/pretrain/echonet_hiera_t_mae.yaml" "$ECHO_
 run_seg_finetune "echo" "hiera_t" "configs/finetune_echonet_seg_hiera.yaml" "$ECHO_DATA_ROOT" "echonet_hiera_t_mae" 2 32 2
 run_video_pretrain "echonet" "configs/pretrain/echonet_videomae_single_frame.yaml" "$ECHO_DATA_ROOT" 3
 run_seg_finetune "echo" "videomae_single_frame" "configs/finetune_echonet_seg_single_frame.yaml" "$ECHO_DATA_ROOT" "echonet_videomae_single_frame" 4 32 2
+run_image_pretrain "echonet" "configs/pretrain/echonet_image_mae_base.yaml" "$ECHO_DATA_ROOT" 5
+run_seg_finetune "echo" "image_mae_base" "configs/finetune_echonet_seg_image_mae_base.yaml" "$ECHO_DATA_ROOT" "echonet_image_mae_base" 6 32 2
 
-run_hiera_pretrain "camus" "configs/pretrain/camus_hiera_t_mae.yaml" "$CAMUS_DATA_ROOT" 5
-run_seg_finetune "camus" "hiera_t" "configs/finetune_camus_seg_hiera.yaml" "$CAMUS_DATA_ROOT" "camus_hiera_t_mae" 6 32 2
-run_video_pretrain "camus" "configs/pretrain/camus_videomae_single_frame.yaml" "$CAMUS_DATA_ROOT" 7
-run_seg_finetune "camus" "videomae_single_frame" "configs/finetune_camus_seg_single_frame.yaml" "$CAMUS_DATA_ROOT" "camus_videomae_single_frame" 8 32 2
+run_hiera_pretrain "camus" "configs/pretrain/camus_hiera_t_mae.yaml" "$CAMUS_DATA_ROOT" 7
+run_seg_finetune "camus" "hiera_t" "configs/finetune_camus_seg_hiera.yaml" "$CAMUS_DATA_ROOT" "camus_hiera_t_mae" 8 32 2
+run_video_pretrain "camus" "configs/pretrain/camus_videomae_single_frame.yaml" "$CAMUS_DATA_ROOT" 9
+run_seg_finetune "camus" "videomae_single_frame" "configs/finetune_camus_seg_single_frame.yaml" "$CAMUS_DATA_ROOT" "camus_videomae_single_frame" 10 32 2
+run_image_pretrain "camus" "configs/pretrain/camus_image_mae_base.yaml" "$CAMUS_DATA_ROOT" 11
+run_seg_finetune "camus" "image_mae_base" "configs/finetune_camus_seg_image_mae_base.yaml" "$CAMUS_DATA_ROOT" "camus_image_mae_base" 12 32 2
 
 python tools/summarize_mae_baseline_compare.py \
   --run_tag "$RUN_TAG" \

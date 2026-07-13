@@ -229,10 +229,14 @@ def main() -> int:
         ("downstream", "echonet", "hiera_t", "echonet_seg", downstream_root / "echonet_seg" / args.run_tag / "hiera_t", "finetune_echonet_seg_hiera_t"),
         ("pretrain", "echonet", "videomae_single_frame", "mae", pretrain_root / "echonet_videomae_single_frame" / args.run_tag, "pretrain_echonet_videomae_single_frame"),
         ("downstream", "echonet", "videomae_single_frame", "echonet_seg", downstream_root / "echonet_seg" / args.run_tag / "videomae_single_frame", "finetune_echonet_seg_videomae_single_frame"),
+        ("pretrain", "echonet", "image_mae_base", "mae", pretrain_root / "echonet_image_mae_base" / args.run_tag, "pretrain_echonet_image_mae_base"),
+        ("downstream", "echonet", "image_mae_base", "echonet_seg", downstream_root / "echonet_seg" / args.run_tag / "image_mae_base", "finetune_echonet_seg_image_mae_base"),
         ("pretrain", "camus", "hiera_t", "mae", pretrain_root / "camus_hiera_t_mae" / args.run_tag, "pretrain_camus_hiera_t_mae"),
         ("downstream", "camus", "hiera_t", "camus_seg", downstream_root / "camus_seg" / args.run_tag / "hiera_t", "finetune_camus_seg_hiera_t"),
         ("pretrain", "camus", "videomae_single_frame", "mae", pretrain_root / "camus_videomae_single_frame" / args.run_tag, "pretrain_camus_videomae_single_frame"),
         ("downstream", "camus", "videomae_single_frame", "camus_seg", downstream_root / "camus_seg" / args.run_tag / "videomae_single_frame", "finetune_camus_seg_videomae_single_frame"),
+        ("pretrain", "camus", "image_mae_base", "mae", pretrain_root / "camus_image_mae_base" / args.run_tag, "pretrain_camus_image_mae_base"),
+        ("downstream", "camus", "image_mae_base", "camus_seg", downstream_root / "camus_seg" / args.run_tag / "image_mae_base", "finetune_camus_seg_image_mae_base"),
     ]
     rows = [_row(*spec, stage_times=stage_times, device=device) for spec in specs]
     csv_path = report_dir / "comparison.csv"
