@@ -22,7 +22,7 @@ from hiera_echo.datasets import build_hiera_frame_dataset
 from hiera_echo.models import build_echo_hiera_mae
 from optim import build_optimizer
 from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter
-from utils.checkpoint import load_checkpoint, save_checkpoint
+from utils.checkpoint import checkpoint_epoch_name, configured_checkpoint_epochs, load_checkpoint, save_checkpoint
 from utils.config import load_config, resolve_output_root, save_config
 from utils.early_stopping import EarlyStopping
 from utils.logger import setup_logger
@@ -49,6 +49,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--lr", type=float, default=None)
     p.add_argument("--init_checkpoint", default=None)
     p.add_argument("--hiera_repo", default=None)
+    p.add_argument("--checkpoint_epochs", default=None, help="Fixed epoch checkpoints, e.g. '50 100 150 200'.")
+    p.add_argument("--save_every_n_epochs", type=int, default=None)
     return p.parse_args()
 
 
@@ -69,6 +71,11 @@ def apply_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> list[str]:
     setv("model", "img_size", args.img_size)
     setv("model", "init_checkpoint", args.init_checkpoint)
     setv("model", "hiera_repo", args.hiera_repo)
+    setv("checkpoint", "save_every_n_epochs", args.save_every_n_epochs)
+    if args.checkpoint_epochs is not None:
+        values = [int(item) for item in str(args.checkpoint_epochs).replace(",", " ").split() if item.strip()]
+        cfg.setdefault("checkpoint", {})["save_epochs"] = values
+        out.append(f"checkpoint.save_epochs={values}")
     if args.lr is not None:
         cfg.setdefault("optimizer", {})["lr"] = args.lr
         cfg.setdefault("optimizer", {})["adamw_lr"] = args.lr
@@ -154,6 +161,18 @@ def build_scheduler(optimizer, cfg: dict[str, Any], steps_per_epoch: int):
 
 def move_batch(batch: dict[str, Any], device: torch.device) -> dict[str, Any]:
     return {k: v.to(device, non_blocking=True) if torch.is_tensor(v) else v for k, v in batch.items()}
+
+
+def eval_checkpoint_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    out = dict(cfg)
+    ckpt_cfg = dict(out.get("checkpoint", {}))
+    if not bool(ckpt_cfg.get("save_eval_optimizer_state", False)):
+        ckpt_cfg["save_optimizer"] = False
+        ckpt_cfg["save_scheduler"] = False
+        ckpt_cfg["save_scaler"] = False
+        ckpt_cfg["save_rng_state"] = False
+    out["checkpoint"] = ckpt_cfg
+    return out
 
 
 def run_epoch(model, loader, optimizer, scheduler, scaler, device, cfg, epoch: int, global_step: int, train: bool, max_steps: int | None):
@@ -248,6 +267,13 @@ def main() -> int:
     )
 
     try:
+        ckpt_cfg = cfg.get("checkpoint", {})
+        fixed_save_epochs = configured_checkpoint_epochs(ckpt_cfg)
+        epoch_name_width = int(ckpt_cfg.get("epoch_name_width", 3))
+        save_every = int(ckpt_cfg.get("save_every_n_epochs", ckpt_cfg.get("save_every", 10)))
+        eval_ckpt_cfg = eval_checkpoint_config(cfg)
+        if fixed_save_epochs:
+            logger.info("fixed_checkpoint_epochs=%s", sorted(fixed_save_epochs))
         for epoch in range(start_epoch, int(cfg.get("train", {}).get("epochs", 100)) + 1):
             if not args.eval_only:
                 tr, global_step = run_epoch(model, train_loader, optimizer, scheduler, scaler, device, cfg, epoch, global_step, True, args.max_steps)
@@ -269,8 +295,10 @@ def main() -> int:
                 best = metric
                 save_checkpoint(run_dir / "checkpoints" / "best.pt", model, optimizer, scheduler, scaler, epoch, global_step, best, cfg)
             save_checkpoint(run_dir / "checkpoints" / "last.pt", model, optimizer, scheduler, scaler, epoch, global_step, best, cfg)
-            if epoch % int(cfg.get("checkpoint", {}).get("save_every", 10)) == 0:
-                save_checkpoint(run_dir / "checkpoints" / f"epoch_{epoch:03d}.pt", model, optimizer, scheduler, scaler, epoch, global_step, best, cfg)
+            if epoch in fixed_save_epochs:
+                save_checkpoint(run_dir / "checkpoints" / checkpoint_epoch_name(epoch, epoch_name_width), model, optimizer, scheduler, scaler, epoch, global_step, best, eval_ckpt_cfg)
+            elif save_every > 0 and epoch % save_every == 0:
+                save_checkpoint(run_dir / "checkpoints" / checkpoint_epoch_name(epoch, epoch_name_width), model, optimizer, scheduler, scaler, epoch, global_step, best, cfg)
             logger.info("epoch=%d train_loss=%.6f val_loss=%.6f best=%s", epoch, tr["loss"] if not args.eval_only else float("nan"), val["loss"], best)
             try:
                 plot_loss_curves(run_dir / "logs" / "metrics.csv", run_dir / "plots" / "loss_latest.png")

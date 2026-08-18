@@ -27,7 +27,7 @@ from tqdm import tqdm
 from models import build_echo_rmae, build_echo_single_frame_mae
 from optim import build_optimizer
 from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter, build_echo_augment_config
-from utils.checkpoint import find_last_checkpoint, load_checkpoint, save_checkpoint
+from utils.checkpoint import checkpoint_epoch_name, configured_checkpoint_epochs, find_last_checkpoint, load_checkpoint, save_checkpoint
 from utils.config import load_config, resolve_output_root, save_config
 from utils.datasets import build_rmae_dataset
 from utils.early_stopping import EarlyStopping
@@ -76,6 +76,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--frames", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--init_checkpoint", default=None)
+    parser.add_argument("--checkpoint_epochs", default=None, help="Fixed epoch checkpoints, e.g. '50 100 150 200'.")
+    parser.add_argument("--save_every_n_epochs", type=int, default=None)
     return parser.parse_args()
 
 
@@ -95,6 +97,11 @@ def apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> list[s
     set_value("data", "prefetch_factor", args.prefetch_factor)
     set_value("model", "frames", args.frames)
     set_value("model", "init_checkpoint", args.init_checkpoint)
+    set_value("checkpoint", "save_every_n_epochs", args.save_every_n_epochs)
+    if args.checkpoint_epochs is not None:
+        values = [int(item) for item in str(args.checkpoint_epochs).replace(",", " ").split() if item.strip()]
+        cfg.setdefault("checkpoint", {})["save_epochs"] = values
+        overrides.append(f"checkpoint.save_epochs={values}")
     if args.lr is not None:
         cfg.setdefault("optimizer", {})["lr"] = args.lr
         cfg.setdefault("optimizer", {})["muon_lr"] = args.lr
@@ -182,6 +189,18 @@ def build_scheduler(optimizer: torch.optim.Optimizer, cfg: dict[str, Any], steps
 
 def current_lr(optimizer: torch.optim.Optimizer) -> float:
     return float(optimizer.param_groups[0]["lr"]) if optimizer.param_groups else 0.0
+
+
+def eval_checkpoint_config(cfg: dict[str, Any]) -> dict[str, Any]:
+    out = dict(cfg)
+    ckpt_cfg = dict(out.get("checkpoint", {}))
+    if not bool(ckpt_cfg.get("save_eval_optimizer_state", False)):
+        ckpt_cfg["save_optimizer"] = False
+        ckpt_cfg["save_scheduler"] = False
+        ckpt_cfg["save_scaler"] = False
+        ckpt_cfg["save_rng_state"] = False
+    out["checkpoint"] = ckpt_cfg
+    return out
 
 
 def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
@@ -409,6 +428,11 @@ def main() -> int:
     epochs = int(cfg.get("train", {}).get("epochs", 1))
     plot_interval = int(cfg.get("train", {}).get("plot_interval", 1))
     save_every = int(ckpt_cfg.get("save_every_n_epochs", 5))
+    fixed_save_epochs = configured_checkpoint_epochs(ckpt_cfg)
+    epoch_name_width = int(ckpt_cfg.get("epoch_name_width", 3))
+    eval_ckpt_cfg = eval_checkpoint_config(cfg)
+    if fixed_save_epochs:
+        logger.info("fixed_checkpoint_epochs=%s", sorted(fixed_save_epochs))
     try:
         for epoch in range(start_epoch, epochs + 1):
             val_metrics = None
@@ -460,8 +484,20 @@ def main() -> int:
                 save_checkpoint(run_dir / "checkpoints" / "last.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
             if ckpt_cfg.get("save_best", True) and improved:
                 save_checkpoint(run_dir / "checkpoints" / "best.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
-            if save_every > 0 and epoch % save_every == 0:
-                save_checkpoint(run_dir / "checkpoints" / f"epoch_{epoch:03d}.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
+            if epoch in fixed_save_epochs:
+                save_checkpoint(
+                    run_dir / "checkpoints" / checkpoint_epoch_name(epoch, epoch_name_width),
+                    model,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    epoch,
+                    global_step,
+                    best_metric,
+                    eval_ckpt_cfg,
+                )
+            elif save_every > 0 and epoch % save_every == 0:
+                save_checkpoint(run_dir / "checkpoints" / checkpoint_epoch_name(epoch, epoch_name_width), model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
             if cfg.get("logging", {}).get("save_plots", True) and epoch % plot_interval == 0:
                 try:
                     plot_loss_curves(run_dir / "logs" / "metrics.csv", run_dir / "plots" / "loss_latest.png")

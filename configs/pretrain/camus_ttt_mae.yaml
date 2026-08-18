@@ -73,7 +73,7 @@ scheduler:
   min_lr: 1.0e-6
 
 train:
-  epochs: 100
+  epochs: 400
   batch_size: 16
   grad_accum_steps: 1
   mixed_precision: true
@@ -92,7 +92,10 @@ checkpoint:
   auto_resume: true
   save_last: true
   save_best: true
-  save_every_n_epochs: 5
+  save_every_n_epochs: 0
+  save_epochs: [50, 100, 150, 200, 250, 300, 350, 400, 600, 800, 1200, 1600]
+  epoch_name_width: 4
+  save_eval_optimizer_state: false
   monitor: val_loss
   mode: min
 
@@ -104,6 +107,6 @@ logging:
   save_plots: true
 
 early_stopping:
-  enabled: true
+  enabled: false
   patience: 20
   min_delta: 1.0e-4

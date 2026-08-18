@@ -1,6 +1,6 @@
 experiment:
-  name: echonet_rvm_mae
-  description: "Single-dataset EchoNet pretraining for EchoRVM-MAE."
+  name: echonet_echocardmae_repro
+  description: "Stage-0 EchoCardMAE-style single-frame MAE trajectory on EchoNet, 0-400 epochs."
   seed: 42
   output_root: /root/autodl-tmp/outputs
 
@@ -41,12 +41,11 @@ augment:
   speckle_sigma_max: 0.10
 
 model:
-  name: echo_rmae
-  core_type: rvm
+  name: echo_single_frame_mae
   init_checkpoint: ckpt/mae/videomae_vit_s.pth
   img_size: 112
   patch_size: 8
-  frames: 16
+  frames: 1
   in_chans: 1
   embed_dim: 384
   depth: 12
@@ -55,17 +54,13 @@ model:
   decoder_depth: 4
   decoder_num_heads: 3
   mask_ratio: 0.75
-  core_depth: 2
   drop_path_rate: 0.05
+  baseline_family: echocardmae_repro
 
 optimizer:
-  name: muon_adamw_hybrid
+  name: adamw
   lr: 1.0e-4
-  muon_lr: 1.0e-4
-  adamw_lr: 1.0e-4
   weight_decay: 0.05
-  muon_momentum: 0.95
-  muon_ns_steps: 5
 
 scheduler:
   name: cosine
@@ -75,7 +70,7 @@ scheduler:
 train:
   epochs: 400
   batch_size: 16
-  grad_accum_steps: 1
+  grad_accum_steps: 4
   mixed_precision: true
   channels_last: false
   torch_compile: false

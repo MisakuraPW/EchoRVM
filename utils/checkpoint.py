@@ -9,6 +9,34 @@ import torch
 from .seed import get_rng_state, set_rng_state
 
 
+def checkpoint_epoch_name(epoch: int, width: int = 3) -> str:
+    return f"epoch_{int(epoch):0{int(width)}d}.pt"
+
+
+def configured_checkpoint_epochs(ckpt_cfg: dict | None) -> set[int]:
+    """Parse fixed scientific-evaluation checkpoint epochs from config."""
+
+    ckpt_cfg = ckpt_cfg or {}
+    raw = (
+        ckpt_cfg.get("save_epochs")
+        or ckpt_cfg.get("fixed_epochs")
+        or ckpt_cfg.get("eval_epochs")
+        or ckpt_cfg.get("scientific_eval_epochs")
+        or []
+    )
+    if isinstance(raw, str):
+        raw = raw.replace(",", " ").split()
+    out = set()
+    for item in raw:
+        try:
+            epoch = int(item)
+        except (TypeError, ValueError):
+            continue
+        if epoch > 0:
+            out.add(epoch)
+    return out
+
+
 def atomic_torch_save(obj: dict, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -29,16 +57,21 @@ def save_checkpoint(
     config: dict,
     extra: dict | None = None,
 ) -> None:
+    ckpt_cfg = config.get("checkpoint", {}) if isinstance(config, dict) else {}
+    save_optimizer = bool(ckpt_cfg.get("save_optimizer", True))
+    save_scheduler = bool(ckpt_cfg.get("save_scheduler", save_optimizer))
+    save_scaler = bool(ckpt_cfg.get("save_scaler", save_optimizer))
+    save_rng_state = bool(ckpt_cfg.get("save_rng_state", save_optimizer))
     payload = {
         "epoch": epoch,
         "global_step": global_step,
         "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-        "scaler_state_dict": scaler.state_dict() if scaler is not None else None,
+        "optimizer_state_dict": optimizer.state_dict() if save_optimizer else None,
+        "scheduler_state_dict": scheduler.state_dict() if save_scheduler and scheduler is not None else None,
+        "scaler_state_dict": scaler.state_dict() if save_scaler and scaler is not None else None,
         "best_metric": best_metric,
         "config": config,
-        "rng_state": get_rng_state(),
+        "rng_state": get_rng_state() if save_rng_state else None,
     }
     if extra:
         payload.update(extra)
