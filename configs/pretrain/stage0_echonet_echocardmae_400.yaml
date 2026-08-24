@@ -54,6 +54,11 @@ model:
   decoder_depth: 4
   decoder_num_heads: 3
   mask_ratio: 0.75
+  auto_roi: true
+  roi_threshold: 0.01
+  roi_min_fraction: 0.05
+  median_blur_kernel: 5
+  norm_pix_loss: false
   drop_path_rate: 0.05
   baseline_family: echocardmae_repro
 
