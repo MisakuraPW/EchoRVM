@@ -69,7 +69,7 @@ for method in $METHODS; do
   done
 done
 
-python tools/summarize_representation_quality.py   --run_tag "$RUN_TAG"   --audit_root "$AUDIT_ROOT"   --report_dir "${REPORT_ROOT}/${RUN_TAG}"   --methods "$METHODS"   --checkpoint_epochs "$CHECKPOINT_EPOCHS"
+python tools/summarize_representation_quality.py   --run_tag "$RUN_TAG"   --audit_root "$AUDIT_ROOT"   --pretrain_root "$PRETRAIN_ROOT"   --report_dir "${REPORT_ROOT}/${RUN_TAG}"   --methods "$METHODS"   --checkpoint_epochs "$CHECKPOINT_EPOCHS"
 
 echo "========== representation audit done =========="
 echo "report=${REPORT_ROOT}/${RUN_TAG}/representation_quality.md"
