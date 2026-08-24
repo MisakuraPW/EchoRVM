@@ -311,6 +311,21 @@ def run_epoch(
     return metrics, global_step
 
 
+def validate_baseline_config(model_cfg: dict[str, Any]) -> None:
+    family = str(model_cfg.get("baseline_family", "")).lower()
+    name = str(model_cfg.get("name", "")).lower()
+    frames = int(model_cfg.get("frames", 1))
+    if family == "videomae_clean_video":
+        if name not in {"echo_videomae", "videomae", "video_mae"} or frames <= 1:
+            raise ValueError("videomae_clean_video requires native echo_videomae with frames > 1")
+        if int(model_cfg.get("tubelet_size", 0)) <= 0:
+            raise ValueError("videomae_clean_video requires tubelet_size")
+    if family == "echocardmae_repro" and name not in {
+        "echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"
+    }:
+        raise ValueError("echocardmae_repro requires the EchoCardMAE single-frame model")
+
+
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
@@ -351,7 +366,19 @@ def main() -> int:
     if hasattr(torch, "set_float32_matmul_precision"):
         torch.set_float32_matmul_precision(str(cfg.get("train", {}).get("matmul_precision", "high")))
     model_cfg = cfg.get("model", {})
+    validate_baseline_config(model_cfg)
     model_name = str(model_cfg.get("name", "echo_rmae")).lower()
+    logger.info(
+        "model_contract name=%s family=%s frames=%d patch=%d tubelet=%s mask_ratio=%.3f auto_roi=%s median_blur=%s",
+        model_name,
+        model_cfg.get("baseline_family", ""),
+        int(model_cfg.get("frames", 1)),
+        int(model_cfg.get("patch_size", 8)),
+        model_cfg.get("tubelet_size", "none"),
+        float(model_cfg.get("mask_ratio", 0.0)),
+        model_cfg.get("auto_roi", False),
+        model_cfg.get("median_blur_kernel", 1),
+    )
     if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(model_cfg).to(device)
     elif model_name in {"echo_videomae", "videomae", "video_mae"}:
