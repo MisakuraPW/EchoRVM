@@ -14,6 +14,11 @@ DISPLAY_COLUMNS = [
     "method",
     "checkpoint_epoch",
     "reconstruction_loss",
+    "pretrain_val_loss",
+    "parameters",
+    "checkpoint_mb",
+    "encoder_samples_per_second",
+    "inference_peak_memory_gb",
     "effective_rank",
     "collapsed_dim_fraction",
     "augmentation_cosine",
@@ -33,6 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run_tag", required=True)
     parser.add_argument("--audit_root", default="/root/autodl-tmp/outputs_representation_audit")
+    parser.add_argument("--pretrain_root", default="/root/autodl-tmp/outputs")
     parser.add_argument("--report_dir", required=True)
     parser.add_argument("--methods", default="echonet_echocardmae_repro echonet_videomae_clean")
     parser.add_argument("--checkpoint_epochs", default="50 100 150 200 250 300 350 400")
@@ -74,6 +80,7 @@ def main() -> int:
     methods = args.methods.replace(",", " ").split()
     epochs = [int(x) for x in args.checkpoint_epochs.replace(",", " ").split()]
     rows = []
+    pretrain_root = Path(args.pretrain_root)
     for method in methods:
         for epoch in epochs:
             path = audit_root / method / f"epoch_{epoch:04d}" / "representation_metrics.json"
@@ -86,6 +93,26 @@ def main() -> int:
             }
             if path.exists():
                 row.update(json.loads(path.read_text(encoding="utf-8")))
+            pretrain_csv = pretrain_root / method / args.run_tag / "logs" / "metrics.csv"
+            if pretrain_csv.exists():
+                with pretrain_csv.open("r", encoding="utf-8", newline="") as handle:
+                    for item in csv.DictReader(handle):
+                        try:
+                            matches = int(float(item.get("epoch", -1))) == epoch
+                        except (TypeError, ValueError):
+                            matches = False
+                        if matches:
+                            for source, target in (
+                                ("train_loss", "pretrain_train_loss"),
+                                ("val_loss", "pretrain_val_loss"),
+                                ("step_time", "pretrain_step_time"),
+                                ("forward_time", "pretrain_forward_time"),
+                                ("backward_time", "pretrain_backward_time"),
+                            ):
+                                value = finite(item.get(source))
+                                if value is not None:
+                                    row[target] = value
+                            break
             rows.append(row)
 
     components = [
