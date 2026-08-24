@@ -35,6 +35,20 @@ def _convert_patch_embed(weight: torch.Tensor, target: torch.Tensor) -> torch.Te
 
     if weight.shape == target.shape:
         return weight
+    if weight.ndim == 5 and target.ndim == 5:
+        # [O, RGB, tubelet, P, P] -> target 3D grayscale tubelet embedding.
+        if weight.shape[2:] != target.shape[2:]:
+            o, channels = weight.shape[:2]
+            weight = F.interpolate(
+                weight.reshape(o * channels, 1, *weight.shape[2:]),
+                size=target.shape[2:],
+                mode="trilinear",
+                align_corners=False,
+            ).reshape(o, channels, *target.shape[2:])
+        if weight.shape[1] != target.shape[1]:
+            weight = weight.mean(dim=1, keepdim=True)
+        if weight.shape == target.shape:
+            return weight
     if weight.ndim == 5 and target.ndim == 4:
         # [O, RGB, tubelet, P, P] -> [O, 1, P, P]
         if weight.shape[-2:] != target.shape[-2:]:
@@ -70,6 +84,33 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
     dst = model.state_dict()
     mapped: dict[str, torch.Tensor] = {}
     skipped: dict[str, str] = {}
+
+    # Native VideoMAE keeps the official key layout.  Load every compatible
+    # encoder/decoder tensor and only adapt RGB/tubelet patch embedding.
+    if hasattr(model, "patch_embed") and not hasattr(model, "frame_mae"):
+        for src_key, src_tensor in src.items():
+            if src_key not in dst:
+                continue
+            dst_tensor = dst[src_key]
+            if src_key == "patch_embed.proj.weight":
+                converted = _convert_patch_embed(src_tensor, dst_tensor)
+                if converted is None:
+                    skipped[src_key] = f"shape {tuple(src_tensor.shape)} -> {tuple(dst_tensor.shape)}"
+                    continue
+                src_tensor = converted
+            if src_tensor.shape != dst_tensor.shape:
+                skipped[src_key] = f"shape {tuple(src_tensor.shape)} != {tuple(dst_tensor.shape)}"
+                continue
+            mapped[src_key] = src_tensor.to(dtype=dst_tensor.dtype)
+        missing, unexpected = model.load_state_dict(mapped, strict=False)
+        return {
+            "path": str(checkpoint_path),
+            "loaded_tensors": len(mapped),
+            "loaded_params": int(sum(t.numel() for t in mapped.values())),
+            "skipped": skipped,
+            "missing_after_partial_load": len(missing),
+            "unexpected_after_partial_load": len(unexpected),
+        }
 
     aliases = [
         # EchoCardMAE / VideoMAE-style checkpoints.
