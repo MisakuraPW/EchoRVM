@@ -89,10 +89,22 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
     # encoder/decoder tensor and only adapt RGB/tubelet patch embedding.
     if hasattr(model, "patch_embed") and not hasattr(model, "frame_mae"):
         for src_key, src_tensor in src.items():
-            if src_key not in dst:
+            candidates = [src_key]
+            if src_key.startswith("encoder."):
+                candidates.append(src_key[len("encoder."):])
+            if src_key.startswith("decoder.blocks."):
+                candidates.append("decoder_blocks." + src_key[len("decoder.blocks."):])
+            if src_key.startswith("decoder.norm."):
+                candidates.append("decoder_norm." + src_key[len("decoder.norm."):])
+            if src_key.startswith("decoder.head."):
+                candidates.append("decoder_pred." + src_key[len("decoder.head."):])
+            if src_key == "encoder_to_decoder.weight":
+                candidates.append("decoder_embed.weight")
+            dst_key = next((key for key in candidates if key in dst), None)
+            if dst_key is None:
                 continue
-            dst_tensor = dst[src_key]
-            if src_key == "patch_embed.proj.weight":
+            dst_tensor = dst[dst_key]
+            if dst_key == "patch_embed.proj.weight":
                 converted = _convert_patch_embed(src_tensor, dst_tensor)
                 if converted is None:
                     skipped[src_key] = f"shape {tuple(src_tensor.shape)} -> {tuple(dst_tensor.shape)}"
@@ -101,7 +113,7 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
             if src_tensor.shape != dst_tensor.shape:
                 skipped[src_key] = f"shape {tuple(src_tensor.shape)} != {tuple(dst_tensor.shape)}"
                 continue
-            mapped[src_key] = src_tensor.to(dtype=dst_tensor.dtype)
+            mapped[dst_key] = src_tensor.to(dtype=dst_tensor.dtype)
         missing, unexpected = model.load_state_dict(mapped, strict=False)
         return {
             "path": str(checkpoint_path),
