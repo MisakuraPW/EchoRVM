@@ -43,6 +43,7 @@ augment:
 model:
   name: echo_videomae
   init_checkpoint: ckpt/mae/videomae_vit_s.pth
+  require_init_min_tensors: 100
   img_size: 112
   patch_size: 16
   frames: 16
