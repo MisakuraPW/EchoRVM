@@ -12,6 +12,7 @@ from torch.nn import functional as F
 
 from .echo_rmae import EchoRMAE, build_echo_rmae
 from .echo_single_frame_mae import EchoSingleFrameMAE, build_echo_single_frame_mae
+from .video_mae import EchoVideoMAE, build_echo_videomae
 from hiera_echo.models import EchoHieraMAE
 from .patch import get_2d_sincos_pos_embed
 from .vit_blocks import Block
@@ -58,6 +59,8 @@ def load_pretrained_rmae(
     model_name = str(cfg.get("name", "echo_rmae")).lower()
     if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(cfg)
+    elif model_name in {"echo_videomae", "videomae", "video_mae"}:
+        model = build_echo_videomae(cfg)
     else:
         model = build_echo_rmae(cfg)
     missing, unexpected = model.load_state_dict(_checkpoint_model_state(ckpt), strict=False)
@@ -141,6 +144,42 @@ class EchoRMAEBackbone(nn.Module):
         }
 
 
+class EchoVideoMAEBackbone(nn.Module):
+    """Expose native VideoMAE tubelet tokens through the common downstream API."""
+
+    def __init__(self, mae: EchoVideoMAE):
+        super().__init__()
+        self.rmae = mae
+        self.embed_dim = int(mae.embed_dim)
+        _, gh, gw = mae.token_grid
+        self.grid_size = int(gh)
+        self.num_patches = int(gh * gw)
+        self.patch_size = int(mae.patch_size)
+
+    def forward_tokens(self, video: torch.Tensor) -> dict[str, torch.Tensor]:
+        if video.ndim != 5:
+            raise ValueError("video must have shape [B,T,C,H,W]")
+        expected = int(self.rmae.frames)
+        if video.shape[1] != expected:
+            # A single annotated frame is repeated for spatial probing.  True
+            # temporal tasks should configure the native pretraining length.
+            if video.shape[1] == 1:
+                video = video.expand(-1, expected, -1, -1, -1)
+            else:
+                indices = torch.linspace(0, video.shape[1] - 1, expected, device=video.device).round().long()
+                video = video.index_select(1, indices)
+        tokens = self.rmae.forward_features(video)
+        tokens = tokens.repeat_interleave(self.rmae.tubelet_size, dim=1)
+        tokens = tokens[:, :expected]
+        return {"encoded": tokens, "outputs": tokens, "states": tokens}
+
+
+def build_echo_backbone(mae: nn.Module) -> nn.Module:
+    if isinstance(mae, EchoVideoMAE):
+        return EchoVideoMAEBackbone(mae)
+    return EchoRMAEBackbone(mae)
+
+
 class PatchSegDecoder(nn.Module):
     """Upsample 14x14 ViT tokens to a 112x112 segmentation map."""
 
@@ -221,14 +260,14 @@ class EchoSegFineTuner(nn.Module):
         decoder_num_heads: int = 3,
     ):
         super().__init__()
-        self.backbone = EchoRMAEBackbone(rmae)
+        self.backbone = build_echo_backbone(rmae)
         decoder_type = decoder_type.lower()
         if decoder_type in {"vit", "vit_patch", "echocardmae"}:
             self.head = ViTPatchSegDecoder(
                 self.backbone.embed_dim,
                 num_classes,
                 self.backbone.grid_size,
-                patch_size=int(rmae.frame_mae.patch_size),
+                patch_size=int(getattr(self.backbone, "patch_size", rmae.frame_mae.patch_size if hasattr(rmae, "frame_mae") else 8)),
                 decoder_dim=decoder_embed_dim,
                 depth=decoder_depth,
                 num_heads=decoder_num_heads,
