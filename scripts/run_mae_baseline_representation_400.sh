@@ -10,6 +10,7 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-4}"
 START_STAGE="${START_STAGE:-1}"
 RUN_AUDIT="${RUN_AUDIT:-1}"
+RUN_FULL_FINETUNE_400="${RUN_FULL_FINETUNE_400:-1}"
 
 run_pretrain() {
   local stage="$1"
@@ -43,6 +44,15 @@ run_pretrain 2 echonet_videomae_clean configs/pretrain/stage0_echonet_videomae_c
 
 if [[ "$RUN_AUDIT" == "1" ]]; then
   RUN_TAG="$RUN_TAG"   PRETRAIN_ROOT="$PRETRAIN_ROOT"   ECHO_DATA_ROOT="$ECHO_DATA_ROOT"   CHECKPOINT_EPOCHS="${CHECKPOINT_EPOCHS:-50 100 150 200 250 300 350 400}"   NUM_WORKERS="$NUM_WORKERS"   bash scripts/eval_representation_checkpoints.sh
+fi
+
+if [[ "$RUN_FULL_FINETUNE_400" == "1" ]]; then
+  RUN_TAG="$RUN_TAG" \
+  PRETRAIN_ROOT="$PRETRAIN_ROOT" \
+  ECHO_DATA_ROOT="$ECHO_DATA_ROOT" \
+  NUM_WORKERS="$NUM_WORKERS" \
+  PREFETCH_FACTOR="$PREFETCH_FACTOR" \
+  bash scripts/eval_epoch400_full_downstream.sh
 fi
 
 echo "========== baseline representation pipeline done =========="
