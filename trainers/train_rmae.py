@@ -24,7 +24,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from models import build_echo_rmae, build_echo_single_frame_mae
+from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae
 from optim import build_optimizer
 from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter, build_echo_augment_config
 from utils.checkpoint import checkpoint_epoch_name, configured_checkpoint_epochs, find_last_checkpoint, load_checkpoint, save_checkpoint
@@ -354,6 +354,8 @@ def main() -> int:
     model_name = str(model_cfg.get("name", "echo_rmae")).lower()
     if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(model_cfg).to(device)
+    elif model_name in {"echo_videomae", "videomae", "video_mae"}:
+        model = build_echo_videomae(model_cfg).to(device)
     else:
         model = build_echo_rmae(model_cfg).to(device)
     init_checkpoint = cfg.get("model", {}).get("init_checkpoint")
