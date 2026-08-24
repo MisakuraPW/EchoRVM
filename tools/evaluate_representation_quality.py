@@ -450,6 +450,9 @@ def main() -> int:
     seed_everything(args.seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, model_cfg, metrics = load_model(args.checkpoint, device)
+    # Model construction consumes RNG differently across architectures. Reset
+    # before masking/probes so every checkpoint of a method sees fixed draws.
+    seed_everything(args.seed + 1000)
     backbone = make_backbone(model).to(device).eval()
 
     audit_cfg = dict(model_cfg)
