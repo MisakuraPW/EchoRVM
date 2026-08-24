@@ -5,8 +5,10 @@ cd "$(dirname "$0")/.."
 export PRETRAIN_ROOT="${PRETRAIN_ROOT:-/root/autodl-tmp/outputs_representation_smoke}"
 export AUDIT_ROOT="${AUDIT_ROOT:-/root/autodl-tmp/outputs_representation_audit_smoke}"
 export REPORT_ROOT="${REPORT_ROOT:-/root/autodl-tmp/outputs_representation_reports_smoke}"
+export FULL_ROOT="${FULL_ROOT:-/root/autodl-tmp/outputs_representation_full_smoke}"
 export RUN_TAG="${RUN_TAG:-rep_smoke_$(date +%Y%m%d_%H%M%S)}"
 export EPOCHS=1
+export EPOCH=1
 export MAX_STEPS=2
 export CHECKPOINT_EPOCHS=1
 export BATCH_SIZE=2
