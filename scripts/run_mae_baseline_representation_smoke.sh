@@ -12,6 +12,7 @@ export CHECKPOINT_EPOCHS=1
 export BATCH_SIZE=2
 export GRAD_ACCUM_STEPS=1
 export NUM_WORKERS=0
+export FULL_EPOCHS=1
 export SMOKE=1
 
 bash scripts/run_mae_baseline_representation_400.sh
