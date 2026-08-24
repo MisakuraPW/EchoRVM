@@ -162,6 +162,38 @@ def main() -> int:
         )
     md_path = report_dir / "representation_quality.md"
     md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    try:
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4.5))
+        plot_specs = (
+            ("probe_score", "Frozen probe score", True),
+            ("ef_ridge_010pct_mae", "EF ridge 10% MAE", False),
+            ("seg_linear_patch_dice", "Patch-linear Dice", True),
+        )
+        for method in methods:
+            method_rows = sorted(
+                (row for row in rows if row["method"] == method and row.get("audit_exists")),
+                key=lambda row: row["checkpoint_epoch"],
+            )
+            for axis, (key, title, _) in zip(axes, plot_specs):
+                points = [(row["checkpoint_epoch"], finite(row.get(key))) for row in method_rows]
+                points = [(epoch, value) for epoch, value in points if value is not None]
+                if points:
+                    axis.plot([point[0] for point in points], [point[1] for point in points], marker="o", label=method)
+                axis.set_title(title)
+                axis.set_xlabel("pretrain epoch")
+                axis.grid(alpha=0.3)
+        axes[0].legend(fontsize=8)
+        fig.tight_layout()
+        plot_path = report_dir / "representation_trajectory.png"
+        fig.savefig(plot_path, dpi=160)
+        plt.close(fig)
+        print(f"wrote {plot_path}")
+    except Exception as exc:
+        print(f"[WARN] trajectory plot skipped: {exc}")
+
     print(f"wrote {csv_path}")
     print(f"wrote {md_path}")
     return 0
