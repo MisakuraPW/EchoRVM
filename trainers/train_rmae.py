@@ -397,6 +397,12 @@ def main() -> int:
         )
         if init_report["skipped"]:
             logger.info("init_checkpoint skipped=%s", init_report["skipped"])
+        minimum = int(model_cfg.get("require_init_min_tensors", 0))
+        if init_report["loaded_tensors"] < minimum:
+            raise RuntimeError(
+                f"Initialization loaded only {init_report['loaded_tensors']} tensors; required at least {minimum}. "
+                "The checkpoint does not match this baseline."
+            )
     if bool(cfg.get("train", {}).get("torch_compile", False)) and hasattr(torch, "compile"):
         model = torch.compile(model)
     optimizer, opt_stats = build_optimizer(model, cfg.get("optimizer", {}))
