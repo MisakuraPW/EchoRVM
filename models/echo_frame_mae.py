@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from .patch import PatchEmbed2D, get_2d_sincos_pos_embed, patchify, roi_to_patch_mask
 from .vit_blocks import Block
@@ -146,6 +147,11 @@ class EchoFrameMAE(nn.Module):
         self.img_size = img_size
         self.patch_size = patch_size
         self.in_chans = in_chans
+        self.auto_roi = bool(kwargs.get("auto_roi", False))
+        self.roi_threshold = float(kwargs.get("roi_threshold", 0.01))
+        self.roi_min_fraction = float(kwargs.get("roi_min_fraction", 0.05))
+        self.median_blur_kernel = int(kwargs.get("median_blur_kernel", 1))
+        self.norm_pix_loss = bool(kwargs.get("norm_pix_loss", False))
         self.encoder = FrameMAEEncoder2D(img_size, patch_size, in_chans, embed_dim, depth, num_heads, mlp_ratio, drop_path_rate)
         self.decoder = FrameMAEDecoder2D(
             self.encoder.num_patches,
@@ -162,8 +168,21 @@ class EchoFrameMAE(nn.Module):
     def num_patches(self) -> int:
         return self.encoder.num_patches
 
+    def estimate_roi(self, x: torch.Tensor) -> torch.Tensor:
+        """Estimate the ultrasound sector from non-black support."""
+        support = (x.abs().amax(dim=1, keepdim=True) > self.roi_threshold).float()
+        pooled = F.avg_pool2d(support, kernel_size=self.patch_size, stride=self.patch_size)
+        patch_roi = pooled.flatten(1) >= self.roi_min_fraction
+        # Degenerate all-black inputs remain valid for smoke tests.
+        empty = ~patch_roi.any(dim=1)
+        if empty.any():
+            patch_roi[empty] = True
+        return patch_roi
+
     def make_masks(self, x: torch.Tensor, mask_ratio: float, roi_mask: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
         patch_roi = roi_to_patch_mask(roi_mask, self.img_size, self.patch_size)
+        if patch_roi is None and self.auto_roi:
+            patch_roi = self.estimate_roi(x)
         if patch_roi is None:
             patch_roi = torch.ones(x.shape[0], self.num_patches, dtype=torch.bool, device=x.device)
         else:
@@ -184,4 +203,17 @@ class EchoFrameMAE(nn.Module):
         return self.decoder(state_tokens, mask, valid_mask)
 
     def target_patches(self, frames: torch.Tensor) -> torch.Tensor:
-        return patchify(frames, self.patch_size)
+        target = frames
+        kernel = self.median_blur_kernel
+        if kernel > 1:
+            if kernel % 2 == 0:
+                raise ValueError("median_blur_kernel must be odd")
+            padded = F.pad(target, (kernel // 2,) * 4, mode="reflect")
+            target = padded.unfold(2, kernel, 1).unfold(3, kernel, 1)
+            target = target.contiguous().view(*target.shape[:4], kernel * kernel).median(dim=-1).values
+        patches = patchify(target, self.patch_size)
+        if self.norm_pix_loss:
+            mean = patches.mean(dim=-1, keepdim=True)
+            var = patches.var(dim=-1, keepdim=True, unbiased=False)
+            patches = (patches - mean) / (var + 1.0e-6).sqrt()
+        return patches
