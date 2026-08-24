@@ -10,7 +10,7 @@ data:
   data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
   train_split: train
   val_split: val
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
   persistent_workers: true
   prefetch_factor: 4
@@ -75,8 +75,8 @@ scheduler:
 
 train:
   epochs: 400
-  batch_size: 16
-  grad_accum_steps: 4
+  batch_size: 128
+  grad_accum_steps: 1
   mixed_precision: true
   channels_last: false
   torch_compile: false
