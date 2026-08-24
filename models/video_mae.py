@@ -175,7 +175,9 @@ class EchoVideoMAE(nn.Module):
         mask = self._tube_mask(video.shape[0], ratio, video.device)
         visible, _ = self.encode_video(video, mask)
         decoded_visible = self.decoder_embed(visible)
-        full = self.mask_token.to(device=decoded_visible.device, dtype=decoded_visible.dtype).expand(\n            video.shape[0], self.patch_embed.num_patches, -1\n        ).clone()
+        full = self.mask_token.to(
+            device=decoded_visible.device, dtype=decoded_visible.dtype
+        ).expand(video.shape[0], self.patch_embed.num_patches, -1).clone()
         full[~mask] = decoded_visible.reshape(-1, decoded_visible.shape[-1])
         full = full + self.decoder_pos_embed.to(device=full.device, dtype=full.dtype)
         for block in self.decoder_blocks:
