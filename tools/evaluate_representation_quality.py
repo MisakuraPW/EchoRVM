@@ -166,6 +166,52 @@ def safe_corr(a: torch.Tensor, b: torch.Tensor) -> float:
 
 
 @torch.inference_mode()
+def benchmark_compute(
+    model: nn.Module,
+    backbone: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    repeats: int = 10,
+) -> dict[str, float]:
+    batch = next(iter(loader))
+    video = to_video(batch, device)
+    model_video = adapt_video_for_model(video, model)
+    warmup = 3 if device.type == "cuda" else 1
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    for _ in range(warmup):
+        model(model_video)
+        feature_sequence(backbone, model, video)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    import time
+
+    start = time.perf_counter()
+    for _ in range(repeats):
+        model(model_video)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    reconstruction_ms = (time.perf_counter() - start) * 1000.0 / repeats
+
+    start = time.perf_counter()
+    for _ in range(repeats):
+        feature_sequence(backbone, model, video)
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    encoder_ms = (time.perf_counter() - start) * 1000.0 / repeats
+    peak = torch.cuda.max_memory_allocated(device) / (1024**3) if device.type == "cuda" else 0.0
+    batch_size = int(video.shape[0])
+    return {
+        "encoder_latency_ms_batch": encoder_ms,
+        "encoder_samples_per_second": batch_size * 1000.0 / max(encoder_ms, 1e-9),
+        "reconstruction_latency_ms_batch": reconstruction_ms,
+        "reconstruction_samples_per_second": batch_size * 1000.0 / max(reconstruction_ms, 1e-9),
+        "inference_peak_memory_gb": peak,
+        "benchmark_batch_size": float(batch_size),
+    }
+
+
+@torch.inference_mode()
 def audit_unsupervised(
     model: nn.Module,
     backbone: nn.Module,
@@ -416,6 +462,7 @@ def main() -> int:
     }
     dataset = build_rmae_dataset(data_cfg, audit_cfg, "val", seed=args.seed)
     loader = DataLoader(dataset, **loader_kwargs(args.batch_size, args.num_workers))
+    metrics.update(benchmark_compute(model, backbone, loader, device, repeats=2 if args.smoke else 10))
     metrics.update(audit_unsupervised(model, backbone, loader, device, min(args.recon_samples, args.feature_samples)))
     metrics.update(ef_probes(model, backbone, args.data_root, model_cfg, args, device))
     metrics.update(segmentation_linear_probe(model, backbone, args.data_root, model_cfg, args, device))
