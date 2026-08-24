@@ -400,9 +400,9 @@ class TemporalQueryEFHead(nn.Module):
 
 
 class EchoEFFineTuner(nn.Module):
-    def __init__(self, rmae: EchoRMAE, hidden_dim: int = 256, dropout: float = 0.2):
+    def __init__(self, rmae: nn.Module, hidden_dim: int = 256, dropout: float = 0.2):
         super().__init__()
-        self.backbone = EchoRMAEBackbone(rmae)
+        self.backbone = build_echo_backbone(rmae)
         self.head = TemporalQueryEFHead(self.backbone.embed_dim, hidden_dim=hidden_dim, dropout=dropout)
 
     def forward(self, video: torch.Tensor) -> torch.Tensor:
