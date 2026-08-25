@@ -5,19 +5,20 @@
 This protocol decides whether an echocardiography MAE should be rejected or
 promoted before expensive 1600-epoch pretraining and downstream experiments.
 
-Two controlled 0-400 epoch trajectories are the reference:
+Three 0-400 epoch video trajectories are the reference:
 
-- echonet_echocardmae_repro: single-frame EchoCardMAE-style reconstruction,
-  75% key-area masking, sector background tokens and 5x5 median targets.
-- echonet_videomae_clean: spatiotemporal VideoMAE, 16 frames, 2-frame
-  tubelets, 16x16 patches, 90% tube masking and normalized-pixel loss.
+- echonet_echocardmae_official_video: official-style 16-frame EchoCardMAE,
+  stride 4, patch 8, tubelet 2, 75% ROI masking, median-denoised targets and
+  two-clip bidirectional InfoNCE.
+- echonet_videomae_matched: the attribution control with the same frames,
+  stride, tokenization, initialization, optimizer, batch and input
+  normalization, but without ROI masking, denoising or clip alignment.
+- echonet_videomae_clean: the complete standard VideoMAE system baseline with
+  16 frames, patch 16, tubelet 2, 90% tube masking and normalized-pixel loss.
 
-They use the same EchoNet split, initialization, optimizer family, schedule,
-online A4 augmentation, seed and checkpoint epochs. Method-specific
-tokenization, masking and targets are retained.
-
-The old VideoMAE baseline was actually a single-frame 2D model with a VideoMAE
-initialization. The current config has a runtime contract and rejects T=1.
+The previously generated echonet_echocardmae_repro run used T=1 and is not an
+EchoCardMAE reproduction. It may only be retained as a named single-frame
+Echo-style ablation.
 
 ## Evaluation Layers
 
@@ -61,13 +62,13 @@ git pull
 bash scripts/run_mae_baseline_representation_smoke.sh
 ~~~
 
-A successful VideoMAE log must show:
+Successful logs must show official EchoCardMAE at frames=16/patch=8/tubelet=2 and both VideoMAE controls at frames=16.
 
 ~~~text
 name=echo_videomae family=videomae_clean_video frames=16 patch=16 tubelet=2
 ~~~
 
-Its first batch must be [B,16,1,112,112]. VideoMAE clean with T=1 is wrong.
+The official EchoCardMAE first batch must be [B,16,3,112,112] and include video_view2. Any EchoCardMAE or VideoMAE baseline with T=1 is invalid.
 
 ## Full 400-Epoch Baselines
 
@@ -101,9 +102,7 @@ RUN_TAG=<existing_tag> START_STAGE=2 \
 bash scripts/run_mae_baseline_representation_400.sh
 ~~~
 
-Do not reuse an EchoCardMAE run created before its log exposes
-auto_roi=True and median_blur=5. Such a run did not execute the complete target
-path.
+Do not reuse the old `echonet_echocardmae_repro` output. A valid run is named `echonet_echocardmae_official_video` and logs frames=16, patch=8, tubelet=2, stride=4 and two_views=true.
 
 ## Re-run Only the Audit
 

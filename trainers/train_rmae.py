@@ -24,7 +24,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae
+from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae, build_echocardmae_video
 from optim import build_optimizer
 from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter, build_echo_augment_config
 from utils.checkpoint import checkpoint_epoch_name, configured_checkpoint_epochs, find_last_checkpoint, load_checkpoint, save_checkpoint
@@ -42,11 +42,12 @@ from utils.seed import seed_everything
 class SyntheticEchoVideoDataset(Dataset):
     """Small synthetic clip dataset for trainer smoke tests."""
 
-    def __init__(self, length: int, frames: int, img_size: int, in_chans: int = 1):
+    def __init__(self, length: int, frames: int, img_size: int, in_chans: int = 1, two_views: bool = False):
         self.length = int(length)
         self.frames = int(frames)
         self.img_size = int(img_size)
         self.in_chans = int(in_chans)
+        self.two_views = bool(two_views)
 
     def __len__(self) -> int:
         return self.length
@@ -56,7 +57,10 @@ class SyntheticEchoVideoDataset(Dataset):
         gen.manual_seed(index)
         video = torch.rand(self.frames, self.in_chans, self.img_size, self.img_size, generator=gen)
         # Add a soft sector-like foreground so masking/ROI paths can be exercised later.
-        return {"video": video}
+        sample = {"video": video}
+        if self.two_views:
+            sample["video_view2"] = torch.rand(self.frames, self.in_chans, self.img_size, self.img_size, generator=gen)
+        return sample
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,7 +148,10 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
     use_synthetic = loader_name in {"synthetic", "debug", "smoke"} or debug_enabled
     if use_synthetic:
         length = int(data_cfg.get(f"synthetic_{split}_samples", max(8, batch_size * max(1, max_steps or 20))))
-        dataset = SyntheticEchoVideoDataset(length=length, frames=frames, img_size=img_size, in_chans=in_chans)
+        dataset = SyntheticEchoVideoDataset(
+            length=length, frames=frames, img_size=img_size, in_chans=in_chans,
+            two_views=bool(model_cfg.get("two_views", False)),
+        )
     else:
         dataset = build_rmae_dataset(data_cfg, model_cfg, split, seed=int(cfg.get("experiment", {}).get("seed", 42)))
     augment_cfg = cfg.get("augment", {})
@@ -227,6 +234,7 @@ def run_epoch(
     clip_grad = train_cfg.get("clip_grad_norm", None)
     model.train(train)
     loss_meter = AverageMeter()
+    component_meters = {"loss_recon": AverageMeter(), "loss_align": AverageMeter()}
     data_meter = AverageMeter()
     step_meter = AverageMeter()
     fwd_meter = AverageMeter()
@@ -255,7 +263,10 @@ def run_epoch(
         start = now()
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
-                out = model(batch["video"])
+                if "video_view2" in batch:
+                    out = model(batch["video"], video_view2=batch["video_view2"])
+                else:
+                    out = model(batch["video"])
                 loss = out["loss"] / grad_accum
         if bool(train_cfg.get("stop_on_nan", True)) and not torch.isfinite(out["loss"]).all():
             raise FloatingPointError(f"Non-finite loss at epoch={epoch} step={step}: {float(out['loss'].detach().cpu())}")
@@ -277,6 +288,9 @@ def run_epoch(
             bwd_meter.update(now() - bwd_start)
         true_loss = float(out["loss"].detach().cpu())
         loss_meter.update(true_loss, n=batch["video"].shape[0])
+        for key, meter in component_meters.items():
+            if key in out:
+                meter.update(float(out[key].detach().cpu()), n=batch["video"].shape[0])
         mem_alloc, mem_reserved = gpu_memory_gb()
         step_time = time.perf_counter() - last_time
         step_meter.update(step_time)
@@ -320,10 +334,11 @@ def validate_baseline_config(model_cfg: dict[str, Any]) -> None:
             raise ValueError("videomae_clean_video requires native echo_videomae with frames > 1")
         if int(model_cfg.get("tubelet_size", 0)) <= 0:
             raise ValueError("videomae_clean_video requires tubelet_size")
-    if family == "echocardmae_repro" and name not in {
-        "echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"
-    }:
-        raise ValueError("echocardmae_repro requires the EchoCardMAE single-frame model")
+    if family == "echocardmae_official_video":
+        if name not in {"echocardmae_video", "echo_card_mae_video"} or frames != 16:
+            raise ValueError("echocardmae_official_video requires the 16-frame video model")
+        if int(model_cfg.get("sampling_rate", 0)) != 4 or not bool(model_cfg.get("two_views", False)):
+            raise ValueError("Official EchoCardMAE requires stride=4 and two_views=true")
 
 
 def main() -> int:
@@ -381,6 +396,8 @@ def main() -> int:
     )
     if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(model_cfg).to(device)
+    elif model_name in {"echocardmae_video", "echo_card_mae_video"}:
+        model = build_echocardmae_video(model_cfg).to(device)
     elif model_name in {"echo_videomae", "videomae", "video_mae"}:
         model = build_echo_videomae(model_cfg).to(device)
     else:

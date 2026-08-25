@@ -86,7 +86,11 @@ class EchoVideoMAE(nn.Module):
         self.in_chans = int(cfg.get("in_chans", 1))
         self.embed_dim = int(cfg.get("embed_dim", 384))
         self.mask_ratio = float(cfg.get("mask_ratio", 0.9))
+        self.mask_strategy = str(cfg.get("mask_strategy", "tube")).lower()
         self.norm_pix_loss = bool(cfg.get("norm_pix_loss", True))
+        mean, std = cfg.get("input_mean"), cfg.get("input_std")
+        self.register_buffer("input_mean", None if mean is None else torch.tensor(mean).view(1, 1, -1, 1, 1), persistent=False)
+        self.register_buffer("input_std", None if std is None else torch.tensor(std).view(1, 1, -1, 1, 1), persistent=False)
         depth = int(cfg.get("depth", 12))
         heads = int(cfg.get("num_heads", 6))
         decoder_dim = int(cfg.get("decoder_embed_dim", 192))
@@ -147,9 +151,26 @@ class EchoVideoMAE(nn.Module):
         spatial_mask.scatter_(1, ids[:, :keep], False)
         return spatial_mask[:, None].expand(-1, gt, -1).reshape(batch, gt * spatial)
 
+    def _normalize_input(self, video: torch.Tensor) -> torch.Tensor:
+        if self.input_mean is None:
+            return video
+        return (video - self.input_mean.to(video)) / self.input_std.to(video)
+
+    def _make_mask(self, batch: int, ratio: float, device: torch.device) -> torch.Tensor:
+        if self.mask_strategy == "tube":
+            return self._tube_mask(batch, ratio, device)
+        if self.mask_strategy != "random":
+            raise ValueError(f"Unknown mask_strategy={self.mask_strategy!r}")
+        keep = max(1, int(round(self.patch_embed.num_patches * (1.0 - ratio))))
+        ids = torch.rand(batch, self.patch_embed.num_patches, device=device).argsort(dim=1)
+        mask = torch.ones(batch, self.patch_embed.num_patches, dtype=torch.bool, device=device)
+        mask.scatter_(1, ids[:, :keep], False)
+        return mask
+
     def encode_video(
         self, video: torch.Tensor, mask: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        video = self._normalize_input(video)
         tokens = self.patch_embed(video)
         tokens = tokens + self.pos_embed.to(device=tokens.device, dtype=tokens.dtype)
         if mask is not None:
@@ -172,7 +193,7 @@ class EchoVideoMAE(nn.Module):
         if (video.shape[1], video.shape[-2], video.shape[-1]) != expected:
             raise ValueError(f"Expected [B,{self.frames},C,{self.img_size},{self.img_size}], got {tuple(video.shape)}")
         ratio = self.mask_ratio if mask_ratio is None else float(mask_ratio)
-        mask = self._tube_mask(video.shape[0], ratio, video.device)
+        mask = self._make_mask(video.shape[0], ratio, video.device)
         visible, _ = self.encode_video(video, mask)
         decoded_visible = self.decoder_embed(visible)
         full = self.mask_token.to(
@@ -183,7 +204,7 @@ class EchoVideoMAE(nn.Module):
         for block in self.decoder_blocks:
             full = block(full)
         pred = self.decoder_pred(self.decoder_norm(full))
-        target = tubelet_patchify(video, self.tubelet_size, self.patch_size)
+        target = tubelet_patchify(self._normalize_input(video), self.tubelet_size, self.patch_size)
         if self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True, unbiased=False)

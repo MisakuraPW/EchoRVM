@@ -101,4 +101,6 @@ class AugmentedVideoDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = dict(self.dataset[index])
         sample["video"] = self.augmenter(sample["video"])
+        if "video_view2" in sample:
+            sample["video_view2"] = self.augmenter(sample["video_view2"])
         return sample

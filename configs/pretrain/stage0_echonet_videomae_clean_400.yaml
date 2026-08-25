@@ -17,7 +17,7 @@ data:
   drop_last: true
 
 augment:
-  enabled: true
+  enabled: false
   preset: A4_tgc_zoom_speckle
   per_frame_random: false
   img_size: 112
@@ -47,6 +47,7 @@ model:
   img_size: 112
   patch_size: 16
   frames: 16
+  sampling_rate: 4
   in_chans: 1
   embed_dim: 384
   depth: 12

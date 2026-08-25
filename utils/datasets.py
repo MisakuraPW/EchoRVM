@@ -21,8 +21,23 @@ from echo_aug_validation.io_utils import (
 )
 
 
-def _as_video_tensor(video: np.ndarray, frames: int, img_size: int) -> torch.Tensor:
-    video = sample_frames(video, frames)
+def _sample_strided_clip(video: np.ndarray, frames: int, sampling_rate: int, random_start: bool) -> np.ndarray:
+    required = (frames - 1) * sampling_rate + 1
+    if len(video) < required:
+        pad = np.zeros((required - len(video), *video.shape[1:]), dtype=video.dtype)
+        video = np.concatenate((video, pad), axis=0)
+    max_start = len(video) - required
+    start = int(np.random.randint(max_start + 1)) if random_start and max_start > 0 else max_start // 2
+    return video[start + np.arange(frames) * sampling_rate]
+
+
+def _as_video_tensor(
+    video: np.ndarray, frames: int, img_size: int, sampling_rate: int = 1, random_start: bool = False
+) -> torch.Tensor:
+    if sampling_rate > 1:
+        video = _sample_strided_clip(video, frames, sampling_rate, random_start)
+    else:
+        video = sample_frames(video, frames)
     video = resize_with_pad(video, img_size)
     if video.ndim == 4:
         if video.shape[-1] == 1:
@@ -36,7 +51,12 @@ def _as_video_tensor(video: np.ndarray, frames: int, img_size: int) -> torch.Ten
     else:
         raise ValueError(f"Unsupported video shape {video.shape}")
     gray = normalize_float(gray)
-    return torch.from_numpy(gray[:, None]).float()
+    tensor = torch.from_numpy(gray[:, None]).float()
+    if channels == 3:
+        tensor = tensor.repeat(1, 3, 1, 1)
+    elif channels != 1:
+        raise ValueError(f"Unsupported requested channel count: {channels}")
+    return tensor
 
 
 def _split_subset(dataset: Dataset, split: str, val_fraction: float = 0.15, seed: int = 42) -> Dataset:
@@ -96,7 +116,10 @@ def _split_camus_rows(rows: list[dict[str, str]], split: str, val_fraction: floa
 
 
 class EchoNetRMAEDataset(Dataset):
-    def __init__(self, root: str | Path, split: str, frames: int, img_size: int, limit: int | None = None):
+    def __init__(
+        self, root: str | Path, split: str, frames: int, img_size: int, limit: int | None = None,
+        sampling_rate: int = 1, two_views: bool = False, channels: int = 1,
+    ):
         self.root = Path(root)
         self.df = load_echonet_filelist(self.root, split)
         if limit is not None:
@@ -115,8 +138,16 @@ class EchoNetRMAEDataset(Dataset):
         path = find_echonet_video(self.root, file_name)
         if path is None:
             raise FileNotFoundError(f"Cannot find EchoNet video for {file_name!r} under {self.root}")
-        video = _as_video_tensor(read_video(path), self.frames, self.img_size)
-        return {"video": video, "id": file_name, "dataset": "echonet", "source_path": str(path)}
+        raw = read_video(path)
+        video = _as_video_tensor(
+            raw, self.frames, self.img_size, self.sampling_rate, self.random_start, self.channels
+        )
+        sample = {"video": video, "id": file_name, "dataset": "echonet", "source_path": str(path)}
+        if self.two_views:
+            sample["video_view2"] = _as_video_tensor(
+                raw, self.frames, self.img_size, self.sampling_rate, self.random_start
+            )
+        return sample
 
 
 class CAMUSRMAEDataset(Dataset):
@@ -181,7 +212,10 @@ def build_rmae_dataset(data_cfg: dict[str, Any], model_cfg: dict[str, Any], spli
         raise ValueError(f"data_root is required for real dataset {name!r}")
     split_name = data_cfg.get(f"{split}_split", split)
     if "echonet" in name:
-        return EchoNetRMAEDataset(root, str(split_name), frames, img_size, limit=limit)
+        return EchoNetRMAEDataset(
+            root, str(split_name), frames, img_size, limit=limit,
+            sampling_rate=sampling_rate, two_views=two_views, channels=channels,
+        )
     if "camus" in name:
         return CAMUSRMAEDataset(
             root,

@@ -24,7 +24,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
-from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae
+from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae, build_echocardmae_video
 from models.downstream import EchoRMAEBackbone, EchoVideoMAEBackbone
 from utils.datasets import build_rmae_dataset
 from utils.downstream_datasets import EchoNetEFDataset, EchoNetSegmentationDataset
@@ -75,7 +75,9 @@ def load_model(path: str, device: torch.device) -> tuple[nn.Module, dict[str, An
     cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     model_cfg = dict(cfg.get("model", {})) if isinstance(cfg, dict) else {}
     name = str(model_cfg.get("name", "echo_rmae")).lower()
-    if name in {"echo_videomae", "videomae", "video_mae"}:
+    if name in {"echocardmae_video", "echo_card_mae_video"}:
+        model = build_echocardmae_video(model_cfg)
+    elif name in {"echo_videomae", "videomae", "video_mae"}:
         model = build_echo_videomae(model_cfg)
     elif name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(model_cfg)

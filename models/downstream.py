@@ -13,6 +13,7 @@ from torch.nn import functional as F
 from .echo_rmae import EchoRMAE, build_echo_rmae
 from .echo_single_frame_mae import EchoSingleFrameMAE, build_echo_single_frame_mae
 from .video_mae import EchoVideoMAE, build_echo_videomae
+from .echocardmae_video import build_echocardmae_video
 from hiera_echo.models import EchoHieraMAE
 from .patch import get_2d_sincos_pos_embed
 from .vit_blocks import Block
@@ -59,6 +60,8 @@ def load_pretrained_rmae(
     model_name = str(cfg.get("name", "echo_rmae")).lower()
     if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(cfg)
+    elif model_name in {"echocardmae_video", "echo_card_mae_video"}:
+        model = build_echocardmae_video(cfg)
     elif model_name in {"echo_videomae", "videomae", "video_mae"}:
         model = build_echo_videomae(cfg)
     else:

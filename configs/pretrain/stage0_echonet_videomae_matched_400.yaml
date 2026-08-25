@@ -1,6 +1,6 @@
 experiment:
-  name: echonet_echocardmae_official_video
-  description: "Official 16-frame EchoCardMAE trajectory on EchoNet, 0-400 epochs."
+  name: echonet_videomae_matched
+  description: "Matched 16-frame VideoMAE control trajectory on EchoNet, 0-400 epochs."
   seed: 42
   output_root: /root/autodl-tmp/outputs
 data:
@@ -18,8 +18,8 @@ augment:
   enabled: false
   img_size: 112
 model:
-  name: echocardmae_video
-  baseline_family: echocardmae_official_video
+  name: echo_videomae
+  baseline_family: videomae_clean_video
   init_checkpoint: ckpt/mae/videomae_vit_s.pth
   require_init_min_tensors: 100
   img_size: 112
@@ -36,6 +36,7 @@ model:
   decoder_num_heads: 3
   tubelet_size: 2
   mask_ratio: 0.75
+  mask_strategy: random
   median_blur_kernel: 3
   align_loss_weight: 0.2
   alignment_temperature: 0.1
@@ -52,8 +53,8 @@ scheduler:
   name: none
 train:
   epochs: 400
-  batch_size: 16
-  grad_accum_steps: 8
+  batch_size: 32
+  grad_accum_steps: 4
   mixed_precision: true
   clip_grad_norm: 1.0
   log_interval: 20
