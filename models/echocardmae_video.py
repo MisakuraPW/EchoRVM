@@ -36,7 +36,7 @@ def _median_blur_video(video: torch.Tensor, kernel: int) -> torch.Tensor:
         return video
     b, t, c, h, w = video.shape
     x = video.reshape(b * t, c, h, w)
-    x = F.pad(x, (kernel // 2,) * 4, mode="reflect")
+    x = F.pad(x, (kernel // 2,) * 4, mode='replicate')
     x = x.unfold(2, kernel, 1).unfold(3, kernel, 1)
     return x.contiguous().view(b, t, c, h, w, kernel * kernel).median(dim=-1).values
 
@@ -45,13 +45,17 @@ class EchoCardMAEVideo(EchoVideoMAE):
     """Official-style EchoCardMAE: two video clips, ROI MVM, denoising and InfoNCE."""
 
     def __init__(self, **cfg):
+        cfg = dict(cfg)
+        cfg.setdefault('position_embedding', 'flat_sinusoid')
+        cfg.setdefault('separate_qv_bias', True)
+        cfg.setdefault('norm_eps', 1e-6)
+        cfg.setdefault('decoder_embed_bias', False)
         super().__init__(**cfg)
         self.core_type = "echocardmae_video"
         self.align_loss_weight = float(cfg.get("align_loss_weight", 0.2))
         self.alignment_temperature = float(cfg.get("alignment_temperature", 0.1))
         self.median_blur_kernel = int(cfg.get("median_blur_kernel", 3))
         self.background_token = nn.Parameter(torch.zeros(1, 1, self.decoder_pred.in_features))
-        nn.init.trunc_normal_(self.background_token, std=0.02)
 
     def _normalize(self, video: torch.Tensor) -> torch.Tensor:
         if video.shape[2] != self.input_mean.shape[2]:
@@ -73,7 +77,7 @@ class EchoCardMAEVideo(EchoVideoMAE):
         for bi in range(b):
             for ti in range(gt):
                 ids = fg[bi, ti].nonzero(as_tuple=False).flatten()
-                count = max(1, int(len(ids) * self.mask_ratio))
+                count = len(ids) - max(1, int(len(ids) * (1 - self.mask_ratio)))
                 chosen = ids[torch.randperm(len(ids), device=ids.device)[:count]]
                 mask[bi, ti, chosen] = True
         return mask.reshape(b, -1)
@@ -83,8 +87,7 @@ class EchoCardMAEVideo(EchoVideoMAE):
         tokens = tokens + self.pos_embed.to(device=tokens.device, dtype=tokens.dtype)
         count = int(visible[0].sum())
         tokens = tokens[visible].reshape(video.shape[0], count, self.embed_dim)
-        for block in self.blocks:
-            tokens = block(tokens)
+        tokens = self.run_blocks(tokens, self.blocks)
         return self.norm(tokens)
 
     def _forward_view(
@@ -107,8 +110,7 @@ class EchoCardMAEVideo(EchoVideoMAE):
             ),
             dim=1,
         )
-        for block in self.decoder_blocks:
-            full = block(full)
+        full = self.run_blocks(full, self.decoder_blocks)
         pred = self.decoder_pred(self.decoder_norm(full[:, -pos_mask.shape[1] :]))
         target_video = _median_blur_video(normalized, self.median_blur_kernel)
         target = tubelet_patchify(target_video, self.tubelet_size, self.patch_size)
@@ -127,6 +129,8 @@ class EchoCardMAEVideo(EchoVideoMAE):
     ) -> dict[str, torch.Tensor]:
         if mask_ratio is not None and float(mask_ratio) != self.mask_ratio:
             raise ValueError("EchoCardMAE uses its configured ROI mask ratio")
+        if self.training and video_view2 is None:
+            raise ValueError('EchoCardMAE training requires two independently sampled clips.')
         foreground = self._foreground(video.shape[0], video.device)
         mask = self._roi_mask(foreground)
         loss1, pred1, feat1 = self._forward_view(video, mask, foreground)

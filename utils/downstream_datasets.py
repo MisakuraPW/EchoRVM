@@ -144,11 +144,8 @@ def _rasterize_echonet_trace(group: pd.DataFrame, shape: tuple[int, int]) -> np.
 
         r, c = skimage.draw.polygon(np.rint(y).astype(np.int64), np.rint(x).astype(np.int64), shape)
         mask[r, c] = 1
-    except Exception:
-        contour = np.stack([x, y], axis=1)
-        contour[:, 0] = np.clip(contour[:, 0], 0, w - 1)
-        contour[:, 1] = np.clip(contour[:, 1], 0, h - 1)
-        cv2.fillPoly(mask, [np.rint(contour).astype(np.int32)], 1)
+    except ImportError as exc:
+        raise RuntimeError('Official EchoNet rasterization requires scikit-image; do not substitute another polygon filler.') from exc
     return mask
 
 

@@ -5,6 +5,7 @@ experiment:
   output_root: /root/autodl-tmp/outputs
 data:
   loader: echonet
+  sampling_protocol: temporal_v1
   dataset_name: EchoNet-Dynamic
   data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
   train_split: train
@@ -26,7 +27,7 @@ model:
   patch_size: 8
   frames: 16
   sampling_rate: 4
-  two_views: true
+  two_views: false
   in_chans: 3
   embed_dim: 384
   depth: 12
@@ -36,10 +37,12 @@ model:
   decoder_num_heads: 3
   tubelet_size: 2
   mask_ratio: 0.75
-  mask_strategy: random
-  median_blur_kernel: 3
-  align_loss_weight: 0.2
-  alignment_temperature: 0.1
+  mask_strategy: tube
+  position_embedding: flat_sinusoid
+  separate_qv_bias: true
+  norm_eps: 1.0e-6
+  decoder_embed_bias: false
+  gradient_checkpointing: true
   norm_pix_loss: false
   drop_path_rate: 0.0
   input_mean: [0.1257, 0.1271, 0.1292]
@@ -54,14 +57,16 @@ scheduler:
 train:
   epochs: 400
   batch_size: 32
-  grad_accum_steps: 4
+  grad_accum_steps: 1
   mixed_precision: true
-  clip_grad_norm: 1.0
+  clip_grad_norm: null
   log_interval: 20
   val_interval: 1
   plot_interval: 1
   stop_on_nan: true
 checkpoint:
+  save_initial: true
+  save_every_n_epochs: 0
   auto_resume: true
   save_last: true
   save_best: true

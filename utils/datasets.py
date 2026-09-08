@@ -32,13 +32,16 @@ def _sample_strided_clip(video: np.ndarray, frames: int, sampling_rate: int, ran
 
 
 def _as_video_tensor(
-    video: np.ndarray, frames: int, img_size: int, sampling_rate: int = 1, random_start: bool = False
+    video: np.ndarray, frames: int, img_size: int, sampling_rate: int = 1, random_start: bool = False,
+    channels: int = 1,
 ) -> torch.Tensor:
     if sampling_rate > 1:
         video = _sample_strided_clip(video, frames, sampling_rate, random_start)
     else:
         video = sample_frames(video, frames)
     video = resize_with_pad(video, img_size)
+    if channels == 3 and video.ndim == 4 and video.shape[-1] >= 3:
+        return torch.from_numpy(normalize_float(video[..., :3]).transpose(0, 3, 1, 2).copy()).float()
     if video.ndim == 4:
         if video.shape[-1] == 1:
             gray = video[..., 0]
@@ -122,6 +125,10 @@ class EchoNetRMAEDataset(Dataset):
     ):
         self.root = Path(root)
         self.df = load_echonet_filelist(self.root, split)
+        self.sampling_rate = int(sampling_rate)
+        self.two_views = bool(two_views)
+        self.channels = int(channels)
+        self.random_start = split.lower() in {'train', 'training'}
         if limit is not None:
             self.df = self.df.iloc[: int(limit)]
         self.frames = int(frames)
@@ -145,7 +152,7 @@ class EchoNetRMAEDataset(Dataset):
         sample = {"video": video, "id": file_name, "dataset": "echonet", "source_path": str(path)}
         if self.two_views:
             sample["video_view2"] = _as_video_tensor(
-                raw, self.frames, self.img_size, self.sampling_rate, self.random_start
+                raw, self.frames, self.img_size, self.sampling_rate, self.random_start, self.channels
             )
         return sample
 
@@ -188,6 +195,9 @@ class CAMUSRMAEDataset(Dataset):
 
 
 def build_rmae_dataset(data_cfg: dict[str, Any], model_cfg: dict[str, Any], split: str, seed: int = 42) -> Dataset:
+    sampling_rate = int(model_cfg.get('sampling_rate', 1))
+    two_views = bool(model_cfg.get('two_views', False))
+    channels = int(model_cfg.get('in_chans', 1))
     frames = int(model_cfg.get("frames", 16))
     img_size = int(model_cfg.get("img_size", 112))
     limit = data_cfg.get("limit", None)

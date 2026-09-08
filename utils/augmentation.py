@@ -98,6 +98,10 @@ class AugmentedVideoDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
+    def set_epoch(self, epoch: int) -> None:
+        if hasattr(self.dataset, 'set_epoch'):
+            self.dataset.set_epoch(epoch)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = dict(self.dataset[index])
         sample["video"] = self.augmenter(sample["video"])

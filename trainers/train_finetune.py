@@ -253,7 +253,7 @@ def log_split_overlap(train_loader: DataLoader, val_loader: DataLoader, logger) 
     overlap = sorted(train_ids & val_ids)
     logger.info("split_overlap_check train_ids=%d val_ids=%d overlap=%d", len(train_ids), len(val_ids), len(overlap))
     if overlap:
-        logger.warning("train/val id overlap detected examples=%s", compact_preview(overlap, max_items=10))
+        raise ValueError(f'Train/validation overlap: {compact_preview(overlap,max_items=10)}')
 
 
 def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) -> torch.nn.Module:
@@ -304,6 +304,9 @@ def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) ->
             logger.info("hiera backbone frozen; training head only")
         return model.to(device)
     rmae, loaded_model_cfg, report = load_pretrained_rmae(ckpt_path, fallback_model_cfg=model_cfg, map_location=device)
+    if model_cfg.get('strict_backbone', False) and (report['missing'] or report['unexpected']):
+        raise RuntimeError(f'Backbone checkpoint mismatch: {report}')
+    seed_everything(int(cfg.get('experiment', {}).get('seed', 42)) + 2001)
     logger.info(
         "loaded_pretrained=%s core_type=%s missing=%d unexpected=%d",
         ckpt_path,
@@ -467,7 +470,8 @@ def run_epoch(
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 loss_raw, metrics, batch_n, ef_pair = compute_loss_and_metrics(model, batch, task, cfg)
-                loss = loss_raw / grad_accum
+                window_start = ((step - 1) // grad_accum) * grad_accum
+                loss = loss_raw / min(grad_accum, expected - window_start)
         if not torch.isfinite(loss_raw).all():
             raise FloatingPointError(f"Non-finite loss at epoch={epoch} step={step}: {float(loss_raw.detach().cpu())}")
         fwd_meter.update(now() - fwd_start)
@@ -478,12 +482,14 @@ def run_epoch(
                 if clip_grad is not None:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_grad))
+                old_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-                if scheduler is not None:
+                updated = scaler.get_scale() >= old_scale
+                if scheduler is not None and updated:
                     scheduler.step()
-                global_step += 1
+                global_step += int(updated)
             bwd_meter.update(now() - bwd_start)
         loss_meter.update(float(loss_raw.detach().cpu()), n=batch_n)
         for key, value in metrics.items():

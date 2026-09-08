@@ -6,8 +6,18 @@ import math
 
 import torch
 from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from .vit_blocks import Block
+
+
+def flat_sinusoid(dim: int, count: int) -> torch.Tensor:
+    position = torch.arange(count, dtype=torch.float64)[:, None]
+    frequency = 10000.0 ** (2 * torch.div(torch.arange(dim, dtype=torch.float64), 2, rounding_mode='floor') / dim)
+    angles = position / frequency[None]
+    angles[:, 0::2] = angles[:, 0::2].sin()
+    angles[:, 1::2] = angles[:, 1::2].cos()
+    return angles[None].float()
 
 
 def _sincos_1d(dim: int, positions: torch.Tensor) -> torch.Tensor:
@@ -122,6 +132,30 @@ class EchoVideoMAE(nn.Module):
         patch_dim = self.tubelet_size * self.patch_size * self.patch_size * self.in_chans
         self.decoder_pred = nn.Linear(decoder_dim, patch_dim)
         self.initialize_weights()
+        self.gradient_checkpointing = bool(cfg.get('gradient_checkpointing', False))
+        self.target_normalization = str(cfg.get('target_normalization', 'legacy'))
+        if cfg.get('position_embedding') == 'flat_sinusoid':
+            self.pos_embed = flat_sinusoid(self.embed_dim, self.patch_embed.num_patches)
+            self.decoder_pos_embed = flat_sinusoid(decoder_dim, self.patch_embed.num_patches)
+        if cfg.get('separate_qv_bias', False):
+            for block in [*self.blocks, *self.decoder_blocks]:
+                attention = block.attn
+                attention.qkv.register_parameter('bias', None)
+                attention.q_bias = nn.Parameter(torch.zeros(attention.qkv.out_features // 3))
+                attention.v_bias = nn.Parameter(torch.zeros(attention.qkv.out_features // 3))
+        for module in self.modules():
+            if isinstance(module, nn.LayerNorm):
+                module.eps = float(cfg.get('norm_eps', 1e-5))
+        if not cfg.get('decoder_embed_bias', True):
+            self.decoder_embed.register_parameter('bias', None)
+
+    def run_blocks(self, tokens, blocks):
+        for block in blocks:
+            if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
+                tokens = checkpoint(block, tokens, use_reentrant=False)
+            else:
+                tokens = block(tokens)
+        return tokens
 
     @property
     def token_grid(self) -> tuple[int, int, int]:
@@ -176,8 +210,7 @@ class EchoVideoMAE(nn.Module):
         if mask is not None:
             visible_count = int((~mask[0]).sum().item())
             tokens = tokens[~mask].reshape(video.shape[0], visible_count, self.embed_dim)
-        for block in self.blocks:
-            tokens = block(tokens)
+        tokens = self.run_blocks(tokens, self.blocks)
         return self.norm(tokens), mask
 
     def forward_features(self, video: torch.Tensor) -> torch.Tensor:
@@ -201,11 +234,17 @@ class EchoVideoMAE(nn.Module):
         ).expand(video.shape[0], self.patch_embed.num_patches, -1).clone()
         full[~mask] = decoded_visible.reshape(-1, decoded_visible.shape[-1])
         full = full + self.decoder_pos_embed.to(device=full.device, dtype=full.dtype)
-        for block in self.decoder_blocks:
-            full = block(full)
+        full = self.run_blocks(full, self.decoder_blocks)
         pred = self.decoder_pred(self.decoder_norm(full))
         target = tubelet_patchify(self._normalize_input(video), self.tubelet_size, self.patch_size)
-        if self.norm_pix_loss:
+        if self.norm_pix_loss and self.target_normalization == 'videomae':
+            # Official VideoMAE normalizes each color channel within a raw
+            # [0,1] tubelet using sample variance, not across color channels.
+            raw = tubelet_patchify(video, self.tubelet_size, self.patch_size)
+            raw = raw.reshape(*raw.shape[:2], -1, self.in_chans)
+            raw = (raw - raw.mean(-2, keepdim=True)) / (raw.var(-2, unbiased=True, keepdim=True).sqrt() + 1e-6)
+            target = raw.flatten(2)
+        elif self.norm_pix_loss:
             mean = target.mean(dim=-1, keepdim=True)
             var = target.var(dim=-1, keepdim=True, unbiased=False)
             target = (target - mean) / (var + 1.0e-6).sqrt()

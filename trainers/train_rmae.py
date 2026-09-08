@@ -7,6 +7,7 @@ The current data contract is deliberately small:
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import os
 import shutil
@@ -36,7 +37,9 @@ from utils.metrics_logger import MetricsLogger
 from utils.plotting import plot_loss_curves
 from utils.pretrained_init import load_videomae_init
 from utils.runtime import AverageMeter, gpu_memory_gb, now
-from utils.seed import seed_everything
+from utils.seed import seed_everything, get_rng_state, set_rng_state
+from models.temporal_mae import TemporalMAE
+from utils.temporal_data import TemporalEchoDataset
 
 
 class SyntheticEchoVideoDataset(Dataset):
@@ -152,6 +155,11 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
             length=length, frames=frames, img_size=img_size, in_chans=in_chans,
             two_views=bool(model_cfg.get("two_views", False)),
         )
+    elif data_cfg.get('sampling_protocol') == 'temporal_v1':
+        dataset = TemporalEchoDataset(
+            data_cfg['data_root'], split, frames, img_size, in_chans,
+            int(model_cfg.get('sampling_rate', 1)), data_cfg.get('limit'),
+            int(cfg.get('experiment', {}).get('seed', 42)), bool(model_cfg.get('two_views', False)))
     else:
         dataset = build_rmae_dataset(data_cfg, model_cfg, split, seed=int(cfg.get("experiment", {}).get("seed", 42)))
     augment_cfg = cfg.get("augment", {})
@@ -159,6 +167,7 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
         dataset = AugmentedVideoDataset(dataset, EchoVideoAugmenter(augment_cfg, img_size=img_size, channels=in_chans))
     workers = int(data_cfg.get("num_workers", 0))
     kwargs: dict[str, Any] = {
+        'generator': torch.Generator().manual_seed(int(cfg.get('experiment', {}).get('seed', 42))),
         "batch_size": batch_size,
         "shuffle": split == "train",
         "num_workers": workers,
@@ -233,6 +242,13 @@ def run_epoch(
     grad_accum = max(1, int(train_cfg.get("grad_accum_steps", 1)))
     clip_grad = train_cfg.get("clip_grad_norm", None)
     model.train(train)
+    validation_rng = get_rng_state() if not train else None
+    seed_everything(int(cfg.get('experiment', {}).get('seed', 42)) + (epoch * 1009 if train else 100000))
+    data_epoch = epoch if train else 0
+    if hasattr(loader.dataset, 'set_epoch'):
+        loader.dataset.set_epoch(data_epoch)
+    if loader.generator is not None:
+        loader.generator.manual_seed(int(cfg.get('experiment', {}).get('seed', 42)) + data_epoch)
     loss_meter = AverageMeter()
     component_meters = {"loss_recon": AverageMeter(), "loss_align": AverageMeter()}
     data_meter = AverageMeter()
@@ -265,9 +281,13 @@ def run_epoch(
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 if "video_view2" in batch:
                     out = model(batch["video"], video_view2=batch["video_view2"])
+                elif isinstance(model, TemporalMAE):
+                    out = model(batch['video'], frame_valid=batch.get('frame_valid'))
                 else:
                     out = model(batch["video"])
-                loss = out["loss"] / grad_accum
+                window_start = ((step - 1) // grad_accum) * grad_accum
+                divisor = min(grad_accum, expected_steps - window_start)
+                loss = out['loss'] / divisor
         if bool(train_cfg.get("stop_on_nan", True)) and not torch.isfinite(out["loss"]).all():
             raise FloatingPointError(f"Non-finite loss at epoch={epoch} step={step}: {float(out['loss'].detach().cpu())}")
         fwd_time = now() - start
@@ -279,12 +299,14 @@ def run_epoch(
                 if clip_grad is not None:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), float(clip_grad))
+                old_scale = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
-                if scheduler is not None:
+                updated = scaler.get_scale() >= old_scale
+                if scheduler is not None and updated:
                     scheduler.step()
-                global_step += 1
+                global_step += int(updated)
             bwd_meter.update(now() - bwd_start)
         true_loss = float(out["loss"].detach().cpu())
         loss_meter.update(true_loss, n=batch["video"].shape[0])
@@ -322,6 +344,9 @@ def run_epoch(
         metrics["backward_time"],
         metrics["step_time"],
     )
+    metrics.update({key: meter.avg for key, meter in component_meters.items()})
+    if validation_rng is not None:
+        set_rng_state(validation_rng)
     return metrics, global_step
 
 
@@ -335,6 +360,10 @@ def validate_baseline_config(model_cfg: dict[str, Any]) -> None:
         if int(model_cfg.get("tubelet_size", 0)) <= 0:
             raise ValueError("videomae_clean_video requires tubelet_size")
     if family == "echocardmae_official_video":
+        required = dict(img_size=112, patch_size=8, tubelet_size=2, in_chans=3, embed_dim=384, depth=12)
+        for key, expected in required.items():
+            if int(model_cfg.get(key, -1)) != expected:
+                raise ValueError(f'Official EchoCardMAE contract requires {key}={expected}.')
         if name not in {"echocardmae_video", "echo_card_mae_video"} or frames != 16:
             raise ValueError("echocardmae_official_video requires the 16-frame video model")
         if int(model_cfg.get("sampling_rate", 0)) != 4 or not bool(model_cfg.get("two_views", False)):
@@ -394,7 +423,9 @@ def main() -> int:
         model_cfg.get("auto_roi", False),
         model_cfg.get("median_blur_kernel", 1),
     )
-    if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
+    if model_name == 'temporal_mae':
+        model = TemporalMAE(**model_cfg).to(device)
+    elif model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(model_cfg).to(device)
     elif model_name in {"echocardmae_video", "echo_card_mae_video"}:
         model = build_echocardmae_video(model_cfg).to(device)
@@ -405,6 +436,9 @@ def main() -> int:
     init_checkpoint = cfg.get("model", {}).get("init_checkpoint")
     if init_checkpoint and not args.resume:
         init_report = load_videomae_init(model, init_checkpoint, map_location="cpu")
+        (run_dir / 'initialization.json').write_text(json.dumps(init_report, indent=2), encoding='utf-8')
+        if model_cfg.get('require_init_complete_encoder', False) and init_report.get('missing_encoder_keys'):
+            raise RuntimeError(f'Incomplete encoder initialization: {init_report["missing_encoder_keys"]}')
         logger.info(
             "init_checkpoint=%s loaded_tensors=%d loaded_params=%d skipped=%d",
             init_report["path"],
@@ -483,6 +517,9 @@ def main() -> int:
     fixed_save_epochs = configured_checkpoint_epochs(ckpt_cfg)
     epoch_name_width = int(ckpt_cfg.get("epoch_name_width", 3))
     eval_ckpt_cfg = eval_checkpoint_config(cfg)
+    if ckpt_cfg.get('save_initial', False) and start_epoch == 1 and not args.eval_only:
+        save_checkpoint(run_dir / 'checkpoints' / 'epoch_0000.pt', model, optimizer,
+                        scheduler, scaler, 0, 0, None, eval_ckpt_cfg)
     if fixed_save_epochs:
         logger.info("fixed_checkpoint_epochs=%s", sorted(fixed_save_epochs))
     try:
@@ -511,7 +548,10 @@ def main() -> int:
                 "step_time": train_metrics["step_time"],
                 "time": datetime.now().isoformat(timespec="seconds"),
             }
-            metrics_logger.write_jsonl("train_metrics.jsonl", row)
+            for key in ('loss_recon', 'loss_align'):
+                row['train_' + key] = train_metrics[key]
+                row['val_' + key] = val_metrics[key] if val_metrics else None
+            metrics_logger.write_jsonl('train_metrics.jsonl', row)
             if val_metrics:
                 metrics_logger.write_jsonl("val_metrics.jsonl", {"epoch": epoch, **val_metrics})
             metrics_logger.update_csv(row)

@@ -17,6 +17,7 @@ from .echocardmae_video import build_echocardmae_video
 from hiera_echo.models import EchoHieraMAE
 from .patch import get_2d_sincos_pos_embed
 from .vit_blocks import Block
+from .temporal_mae import TemporalMAE
 
 
 def _checkpoint_model_state(ckpt: dict[str, Any]) -> dict[str, torch.Tensor]:
@@ -58,7 +59,9 @@ def load_pretrained_rmae(
         if isinstance(saved_cfg, dict) and isinstance(saved_cfg.get("model"), dict):
             cfg = dict(saved_cfg["model"])
     model_name = str(cfg.get("name", "echo_rmae")).lower()
-    if model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
+    if model_name == 'temporal_mae':
+        model = TemporalMAE(**cfg)
+    elif model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(cfg)
     elif model_name in {"echocardmae_video", "echo_card_mae_video"}:
         model = build_echocardmae_video(cfg)
@@ -163,6 +166,10 @@ class EchoVideoMAEBackbone(nn.Module):
         if video.ndim != 5:
             raise ValueError("video must have shape [B,T,C,H,W]")
         expected = int(self.rmae.frames)
+        if video.shape[2] == 1 and self.rmae.in_chans == 3:
+            video = video.expand(-1, -1, 3, -1, -1)
+        if isinstance(self.rmae, TemporalMAE) and video.shape[1] != expected:
+            raise ValueError(f'Temporal fine-tuning requires real {expected}-frame context, not repeated frames.')
         if video.shape[1] != expected:
             # A single annotated frame is repeated for spatial probing.  True
             # temporal tasks should configure the native pretraining length.
@@ -439,7 +446,12 @@ def segmentation_metrics(logits: torch.Tensor, target: torch.Tensor, num_classes
         t = target == cls
         denom = p.sum().item() + t.sum().item()
         tp = (p & t).sum().item()
-        dice = 1.0 if denom == 0 else 2.0 * (p & t).sum().item() / denom
+        per_image_denom = p.flatten(1).sum(1) + t.flatten(1).sum(1)
+        per_image_tp = (p & t).flatten(1).sum(1)
+        per_image_dice = torch.where(per_image_denom > 0,
+                                     2.0 * per_image_tp / per_image_denom.clamp_min(1),
+                                     torch.ones_like(per_image_denom, dtype=torch.float32))
+        dice = float(per_image_dice.mean())
         out[f"dice_class_{cls}"] = float(dice)
         out[f"_seg_tp_class_{cls}"] = float(tp)
         out[f"_seg_pred_class_{cls}"] = float(p.sum().item())

@@ -1,5 +1,12 @@
 # Recurrent Echo MAE
 
+## 时域表征研究入口（v1）
+
+新一轮视频基线修正、短片段 VideoMAE + RVM、阶段冻结评估和服务器连跑，请使用
+[时域研究执行说明](docs/temporal_research_execution.md)。
+入口为 `bash scripts/run_temporal_research.sh`，默认9组，`--suite full`为37组；
+正式运行前加 `--smoke` 验证真实数据链路。新实验必须使用新run_tag，不接续旧的单帧/视频混合基线。
+
 本项目用于开发面向超声心动图的 Recurrent MAE：以 EchoCardMAE 为基础，优先支持 EchoNet-Dynamic 与 CAMUS，后续在 EchoRisk 权限可用后接入多中心风险预测任务。
 
 当前阶段包含 AutoDL 起步脚本、超声特化数据增强、以及用于筛选增强策略的小模型验证流程。

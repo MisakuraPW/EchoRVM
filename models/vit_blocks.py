@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class DropPath(nn.Module):
@@ -35,25 +36,29 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True, attn_drop: float = 0.0, proj_drop: float = 0.0):
+    def __init__(self, dim: int, num_heads: int, qkv_bias: bool = True, attn_drop: float = 0.0, proj_drop: float = 0.0, separate_qv_bias: bool = False):
         super().__init__()
         if dim % num_heads != 0:
             raise ValueError("dim must be divisible by num_heads")
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias and not separate_qv_bias)
+        self.q_bias = nn.Parameter(torch.zeros(dim)) if qkv_bias and separate_qv_bias else None
+        self.v_bias = nn.Parameter(torch.zeros(dim)) if qkv_bias and separate_qv_bias else None
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, n, c = x.shape
-        qkv = self.qkv(x).reshape(b, n, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        bias = self.qkv.bias
+        if self.q_bias is not None:
+            bias = torch.cat((self.q_bias, torch.zeros_like(self.q_bias), self.v_bias))
+        qkv = F.linear(x, self.qkv.weight, bias).reshape(b, n, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)
-        attn = (q * self.scale) @ k.transpose(-2, -1)
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        x = (attn @ v).transpose(1, 2).reshape(b, n, c)
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
+        x = x.transpose(1, 2).reshape(b, n, c)
         return self.proj_drop(self.proj(x))
 
 
@@ -77,9 +82,8 @@ class CrossAttention(nn.Module):
         q = self.q(query).reshape(b, nq, self.num_heads, self.head_dim).transpose(1, 2)
         kv = self.kv(context).reshape(b, nk, 2, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         k, v = kv.unbind(0)
-        attn = (q * self.scale) @ k.transpose(-2, -1)
-        attn = self.attn_drop(attn.softmax(dim=-1))
-        x = (attn @ v).transpose(1, 2).reshape(b, nq, c)
+        x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p if self.training else 0.0)
+        x = x.transpose(1, 2).reshape(b, nq, c)
         return self.proj_drop(self.proj(x))
 
 
@@ -93,12 +97,14 @@ class Block(nn.Module):
         drop: float = 0.0,
         attn_drop: float = 0.0,
         drop_path: float = 0.0,
+        norm_eps: float = 1e-5,
+        separate_qv_bias: bool = False,
     ):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = Attention(dim, num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop)
+        self.norm1 = nn.LayerNorm(dim, eps=norm_eps)
+        self.attn = Attention(dim, num_heads, qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop, separate_qv_bias=separate_qv_bias)
         self.drop_path = DropPath(drop_path)
-        self.norm2 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim, eps=norm_eps)
         self.mlp = Mlp(dim, mlp_ratio=mlp_ratio, drop=drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

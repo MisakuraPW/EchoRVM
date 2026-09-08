@@ -41,8 +41,12 @@ def atomic_torch_save(obj: dict, path: str | Path) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    torch.save(obj, tmp)
-    tmp.replace(path)
+    try:
+        torch.save(obj, tmp)
+        tmp.replace(path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def save_checkpoint(

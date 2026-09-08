@@ -115,9 +115,12 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
                 continue
             mapped[dst_key] = src_tensor.to(dtype=dst_tensor.dtype)
         missing, unexpected = model.load_state_dict(mapped, strict=False)
+        missing_encoder = [key for key in dst if key.startswith(('patch_embed.', 'blocks.', 'norm.')) and key not in mapped]
         return {
             "path": str(checkpoint_path),
             "loaded_tensors": len(mapped),
+            'missing_encoder_keys': missing_encoder,
+            'loaded_keys': sorted(mapped),
             "loaded_params": int(sum(t.numel() for t in mapped.values())),
             "skipped": skipped,
             "missing_after_partial_load": len(missing),
