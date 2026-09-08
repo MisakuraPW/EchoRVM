@@ -53,6 +53,7 @@ def make_config(kind, name, changes, args):
     cfg = load_config(ROOT / 'configs' / 'pretrain' / baseline)
     cfg['experiment'].update(name=name, seed=args.seed, description='Temporal study v1: ' + name)
     cfg['data'].update(data_root=args.data_root, sampling_protocol='temporal_v1',
+                       input_protocol=args.input_protocol,
                        num_workers=args.num_workers, prefetch_factor=args.prefetch_factor)
     cfg['model'].update(init_checkpoint=args.init_checkpoint, gradient_checkpointing=True,
                         require_init_complete_encoder=True)
@@ -102,6 +103,7 @@ def summarize(root):
         budget = max(map(int, m['ef']))
         probe = m['ef'][str(budget)]
         rows.append(dict(method=path.parents[2].name, epoch=m['metadata']['epoch'],
+                         input_protocol=m.get('protocol', {}).get('input_protocol', 'rgb'),
                          ef_train_cases=budget, ef_mae=probe['mae'], ef_rmse=probe['rmse'],
                          ef_mae_ci_low=probe['mae_ci95']['low'], ef_mae_ci_high=probe['mae_ci95']['high'],
                          seg_dice=m['segmentation']['dice_mean'],
@@ -215,10 +217,12 @@ def paired_report(root,rows):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--suite', choices=('core', 'full'), default='core')
-    parser.add_argument('--run_tag', default=os.environ.get('RUN_TAG', 'temporal_' + datetime.now().strftime('%Y%m%d_%H%M%S')))
+    parser.add_argument('--run_tag', default=os.environ.get('RUN_TAG', 'temporal_gray_' + datetime.now().strftime('%Y%m%d_%H%M%S')))
     parser.add_argument('--output_root', default='/root/autodl-tmp/outputs_temporal')
     parser.add_argument('--data_root', default=None,
-                        help='Existing data root. Default: local EchoNet-Dynamic-rgb cache; no new cache is generated.')
+                        help='Existing data root. Default: local EchoNet-Dynamic grayscale cache; no files are generated.')
+    parser.add_argument('--input_protocol', choices=('gray_repeat3', 'rgb'), default='gray_repeat3',
+                        help='gray_repeat3: existing grayscale NPY, expand only sampled clips to three channels.')
     parser.add_argument('--prepare_rgb_cache', action='store_true')
     parser.add_argument('--source_root', default='/root/autodl-fs/datasets/EchoNet-Dynamic')
     parser.add_argument('--init_checkpoint', default='ckpt/mae/videomae_vit_s.pth')
@@ -253,7 +257,9 @@ def main():
     if args.save_last_every < 1 or args.min_free_gb < 0:
         parser.error('--save_last_every must be positive and --min_free_gb must be nonnegative')
     if args.data_root is None:
-        args.data_root = '/root/autodl-tmp/datasets/EchoNet-Dynamic-rgb'
+        args.data_root = '/root/autodl-tmp/datasets/EchoNet-Dynamic' + ('-rgb' if args.input_protocol == 'rgb' else '')
+    if args.prepare_rgb_cache and args.input_protocol != 'rgb':
+        parser.error('--prepare_rgb_cache requires --input_protocol rgb. Gray runs reuse existing NPY without caching.')
     if args.prepare_rgb_cache and not args.data_root.endswith('-rgb'):
         args.data_root += '-rgb'
     if args.smoke:
@@ -281,11 +287,16 @@ def main():
               f'memory={m.get("memory_mode", "none"):7s} epochs={args.epochs}')
     print(f'Experiments={len(entries)}; result={root}; ckpt={ckpt_root}; baseline old results will NOT be reused.')
     print(f'Data={args.data_root}; prepare_rgb_cache={args.prepare_rgb_cache}; '
-          f'last_every={args.save_last_every}; keep_stages={args.keep_stage_checkpoints}')
+          f'input_protocol={args.input_protocol}; last_every={args.save_last_every}; keep_stages={args.keep_stage_checkpoints}')
     if args.dry_run:
         return
     root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full')],
                                      migrate=args.migrate_legacy_layout)
+    # Even --only must not append gray results to a run containing RGB experiments.
+    for old_config in root.glob('*/requested_config.yaml'):
+        previous = yaml.safe_load(old_config.read_text(encoding='utf-8'))
+        if previous.get('data', {}).get('input_protocol', 'rgb') != args.input_protocol:
+            raise RuntimeError('Input protocol changed: use a new run_tag instead of mixing RGB and gray experiments.')
     if not Path(args.init_checkpoint).is_file():
         raise FileNotFoundError(args.init_checkpoint)
     if not args.no_audit or args.anchors != 'none':
@@ -309,11 +320,16 @@ def main():
     with (root/'invocations.jsonl').open('a',encoding='utf-8') as handle:
         handle.write(json.dumps(environment)+'\n')
     from utils.temporal_data import TemporalEchoDataset
-    preflight = TemporalEchoDataset(args.data_root,'val',16,channels=3,limit=1)[0]
+    preflight = TemporalEchoDataset(args.data_root,'val',16,channels=3,limit=1,
+                                    input_protocol=args.input_protocol)[0]
     (root/'input_contract.json').write_text(json.dumps(dict(
         video_shape=list(preflight['video'].shape),source_path=preflight['source_path'],
         valid_frames=int(preflight['frame_valid'].sum()),data_root=args.data_root,
-        color_contract='RGB NPY or original AVI decoded BGR then converted to RGB; no grayscale replication'),
+        input_protocol=args.input_protocol,
+        channels_equal=bool(torch.equal(preflight['video'][:,0],preflight['video'][:,1]) and
+                            torch.equal(preflight['video'][:,0],preflight['video'][:,2])),
+        color_contract=('Grayscale NPY sampled first, then repeated to 3 channels in memory; model normalization unchanged'
+                        if args.input_protocol == 'gray_repeat3' else 'RGB NPY or AVI decoded to RGB')),
         indent=2),encoding='utf-8')
     timings = []
     if (root / 'stage_times.csv').exists():
@@ -384,7 +400,8 @@ def main():
                 anchor['model'].update(backbone_checkpoint=str(checkpoint_dir/f'epoch_{args.epochs:04d}.pt'),
                                        frames=cfg['model']['frames'],img_size=112,seg_use_temporal_context=True,
                                        strict_backbone=True)
-                anchor['data'].update(data_root=args.data_root,num_workers=args.num_workers)
+                anchor['data'].update(data_root=args.data_root,num_workers=args.num_workers,
+                                      input_protocol=args.input_protocol)
                 anchor['experiment']['seed'] = args.seed
                 # Full-token video fine-tuning is much larger than masked MAE.
                 anchor['train'].update(batch_size=2,grad_accum_steps=16)

@@ -4,6 +4,7 @@ experiment:
   seed: 42
   output_root: /root/autodl-tmp/outputs
 data:
+  input_protocol: gray_repeat3
   loader: echonet
   sampling_protocol: temporal_v1
   dataset_name: EchoNet-Dynamic

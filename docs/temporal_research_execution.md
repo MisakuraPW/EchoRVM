@@ -32,21 +32,21 @@
 官方依据：资料/EchoCardMAE-main/EchoCardMAE-main/pretrain.py、model/echocardmae_vit.py、model/utils.py。
 VideoMAE target 依据：[官方 engine_for_pretraining.py](https://github.com/MCG-NJU/VideoMAE/blob/main/engine_for_pretraining.py)。
 
-## 3. RGB 输入与可选缓存
+## 3. 统一灰度输入
 
-旧 tools/cache_echonet_npy.py 默认生成灰度 [T,H,W]。新基线需要 [T,H,W,3] RGB，不能只复制灰度通道后声称完全复现官方输入。
+2026-09-09 最新协议：gray_repeat3。复用旧 tools/cache_echonet_npy.py 生成的灰度 [T,H,W] uint8 NPY，不重新缓存，不依赖已删除的RGB目录。
 
-2026-09-09 更新：按用户最新选择，默认复用已有的 /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb，不重复缓存。只有显式指定 --prepare_rgb_cache 才调用缓存工具；已有缓存不会被自动删除。需要省磁盘时可显式 --data_root 指向原始 AVI 根目录，在线解码仍产生相同RGB输入。
+默认数据根目录 /root/autodl-tmp/datasets/EchoNet-Dynamic。以mmap读取，先采样真实帧，再在内存中把灰度扩展三通道。模型保持in_chans=3及现有三通道初始化，不执行以前将patch权重求平均的单通道结构转换。
 
-缓存生成工具的默认原始位置为 /root/autodl-fs/datasets/EchoNet-Dynamic，可用 --source_root 修改。实际训练来源用 --data_root 选择；默认指向上述已存在RGB缓存。
+MAE预训练、初始化阶段评估、所有冻结探针及可选全量微调均使用同一灰度内容协议。模型内部原有mean/std标准化不变；复制前后三份原始灰度相同，不代表经过不同通道mean/std之后数值仍完全相同。
 
-灰度NPY在技术上可以在线复制成三通道，不需大缓存、不需反复AVI解码，也不必然更慢。但这不是恢复原始RGB；严格复现协议目前不接受灰度替代。这个校验是为了固定实验输入，不代表MAE本身只能使用RGB，也不意味着RGB必然性能更好。若另立灰度协议，应所有对照统一转换，而非只改某个模型。
+这是统一灰度输入的算法适配对照，不再宣称原始RGB输入的逐像素复现；与旧RGB实验必须分开run_tag。input_protocol保存在配置、权重、input_contract.json及评估报告中，评估从权重自动读取，防止训练灰度、评价RGB。
 
-原始目录必须含 FileList.csv、VolumeTracings.csv、Videos/。如果原始 AVI 已在本地数据盘，--data_root 指向该根目录可以减少网络读取。不要指向旧灰度 NPY 根目录冒充 RGB 输入；同目录同时有 NPY 和 AVI 时现有查找逻辑优先 NPY。
+数据根目录需要FileList.csv、VolumeTracings.csv及npy/。若只存在AVI，仍可解码后用与旧缓存一致的OpenCV灰度转换；新默认路径优先读取已有NPY，不反复解码。RGB缓存的可选灰度转换约定输入缓存是RGB，而AVI解码为BGR，两条路径使用相应转换，避免通道次序错误。
 
 在线解码节省磁盘，但增加 CPU 解码和可能的网络 I/O，实际吞吐需查看 data_time、step_time。想减少 I/O 可仅复制压缩的原始 AVI 和 CSV 到本地，不必解压为 NPY；先检查空间，不自动额外复制。
 
-RGB 缓存的通道顺序约定为 RGB。来自其他工具的 BGR NPY 必须先确认通道顺序；仅凭数组 shape 无法检测顺序。
+保留--input_protocol rgb作为显式兼容选项；只有该选项才能同时使用--prepare_rgb_cache。本轮灰度训练不要添加缓存生成参数。完整命令见 [灰度训练说明](temporal_gray_run.md)。
 
 ## 4. 默认 9 组主实验
 
@@ -156,24 +156,24 @@ bash scripts/run_temporal_research.sh --dry_run
 
 ```bash
 bash scripts/run_temporal_research.sh \
-  --run_tag temporal_v1_smoke --smoke
+  --run_tag temporal_gray_smoke --smoke
 ```
 
-已有RGB缓存不在默认位置时，用 --data_root 指定它。想在线读AVI，也用该参数指向含Videos和CSV的原始根目录。
+灰度缓存不在默认位置时，用 --data_root 指定它。想在线读AVI，也用该参数指向含Videos和CSV的原始根目录，灰度内容协议保持不变。
 
 正式主实验：修正后的三条视频基线＋六条时域研究模型，共9组，每组400轮及全阶段冻结评估：
 
 ```bash
 bash scripts/run_temporal_research.sh \
-  --run_tag temporal_v1_s42
+  --run_tag temporal_gray_s42
 ```
 
-缓存已经生成，之后可以显式指定，不再调用缓存工具：
+也可以显式指定已有灰度缓存：
 
 ```bash
 bash scripts/run_temporal_research.sh \
-  --run_tag temporal_v1_s42 \
-  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb
+  --run_tag temporal_gray_s42 \
+  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic
 ```
 
 同样的原始命令也是续跑命令，必须保留首次运行的 data_root 和训练参数。已完成阶段跳过，未完成训练从最近的 last.pt 恢复；默认每10轮保存，因此意外关机可能需要重算最多约10轮，而不是逐batch精确恢复。不要把 partial-epoch 的 interrupt.pt 当成完整epoch续训点。
@@ -183,15 +183,15 @@ bash scripts/run_temporal_research.sh \
 显式选择个别实验：
 
 ```bash
-bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
-  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb \
+bash scripts/run_temporal_research.sh --run_tag temporal_gray_s42 \
+  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic \
   --only hier_global hier_spatial hier_dual
 ```
 
 只重新汇总、重新打包：
 
 ```bash
-bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 --summarize_only
+bash scripts/run_temporal_research.sh --run_tag temporal_gray_s42 --summarize_only
 ```
 
 同一run_tag下改变已有实验的训练超参数会报错，防止把两套协议接在一起。改batch/epochs/seed/data_root请用新run_tag；不能把旧baseline400标签填进来接续错误实验。单纯改变权重目录、last保存频率和磁盘保留策略不改变训练协议。
@@ -201,8 +201,8 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 --summarize_only
 --anchors baselines 在三条视频基线最后一个checkpoint上追加 EchoNet EF 和分割全量微调；--anchors core 对主实验9组追加。默认none，避免把37组消融自动扩成大量昂贵下游实验。
 
 ```bash
-bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
-  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb \
+bash scripts/run_temporal_research.sh --run_tag temporal_gray_s42 \
+  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic \
   --anchors baselines
 ```
 
@@ -213,13 +213,13 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
 ## 10. 默认资源和磁盘策略
 
 - 原始图像通道数为3，局部编码器384维、12层，MAE解码器192维、4层；本轮记忆core_depth=1，实际参数完整保存于配置。
-- RGB缓存约为同帧数uint8灰度缓存的3倍大小。先用 df -h /root/autodl-tmp 检查空间，另预留阶段权重和last.pt原子保存时临时副本的空间。
+- 本轮复用已有灰度缓存，不生成三倍大小的RGB缓存。仍须用 df -h /root/autodl-tmp 检查阶段权重和last.pt原子保存临时副本所需空间。
 
 - 官方/视频基线 microbatch32，累积1。EchoCardMAE的InfoNCE负样本数取决于microbatch；不能拿梯度累积假装扩大负样本集合。
 - 时域研究 microbatch8，累积4，有效batch32；可用 --batch_size / --grad_accum_steps 修改。所有时域对照同时修改。
 - --baseline_batch_size 单独控制视频基线；改小后要记录它对InfoNCE的影响。
 - AMP、SDPA注意力、编码器/MAE解码器activation checkpointing开启。CPU数据worker默认8、prefetch4。
-- 默认复用autodl-tmp上的RGB缓存；在线AVI可选但不默认。workers优先按data_time调，不以瞬时GPU利用率为唯一目标。
+- 默认复用autodl-tmp上的灰度缓存；在线AVI可选但不默认。workers优先按data_time调，不以瞬时GPU利用率为唯一目标。
 - frame_rvm64每视频有64次串行状态更新，不一定比16×4结构快。增加batch也不保证消除kernel调度开销。
 - OOM先将时域batch8改4、累积4改8，在新run_tag重跑同组对照；不自动缩短frames或改变mask比例。
 - 本地没有CUDA训练验证，不能保证上述batch在每个GPU/软件环境都适合。服务器冒烟就是正式前的显存与依赖检查。
@@ -229,7 +229,7 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
 - --keep_stage_checkpoints 保留所有阶段快照；--keep_completed_resume 保留已完成实验的完整续训文件。默认省空间策略下，中间权重删除后不能再对它们新增评价；已有指标/图/日志不删。需要未来重评时从一开始使用保留开关。
 - 保存前估算临时checkpoint所需空间，并额外保留2GiB（--min_free_gb）。不足时明确停止并保留原last，而非自动删除其他数据。这不能代替磁盘容量管理，也不能保证其他进程不会同时写满磁盘。
 - 默认不保存best MAE权重，不用val_loss挑研究阶段。训练loss图每5轮刷新，原始epoch日志每轮保存。
-- 保存invocations.jsonl中的Git版本、PyTorch、GPU及命令；input_contract.json记录实际RGB输入；requested_config.yaml/config.yaml记录实参。
+- 保存invocations.jsonl中的Git版本、PyTorch、GPU及命令；input_contract.json记录gray_repeat3协议、三通道是否相同及来源；requested_config.yaml/config.yaml记录实参。
 
 ## 11. 下载哪些结果
 

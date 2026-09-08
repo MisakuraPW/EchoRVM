@@ -22,6 +22,7 @@ from tqdm import tqdm
 from models.temporal_mae import TemporalMAE
 from tools.evaluate_representation_quality import load_model, regression_metrics
 from utils.temporal_data import TemporalEchoDataset
+from utils.echo_input import read_echo_input
 from utils.downstream_datasets import EchoNetSegmentationDataset, _rasterize_echonet_trace
 from utils.datasets import _as_video_tensor
 from echo_aug_validation.io_utils import find_echonet_video, read_video
@@ -212,6 +213,7 @@ class ProbeSegDataset(EchoNetSegmentationDataset):
         super().__init__(root, split, 112)
         self.context = args.audit_frames
         self.channels = channels
+        self.input_protocol = args.input_protocol
         rng = np.random.default_rng(args.seed)
         # Select patients, then retain both annotated frames, not a prefix of frames.
         ids = sorted({sample['stem'] for sample in self.samples})
@@ -228,11 +230,9 @@ class ProbeSegDataset(EchoNetSegmentationDataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         path = find_echonet_video(self.root, sample['stem'])
-        raw = np.load(path, mmap_mode='r') if path.suffix == '.npy' else read_video(path)
-        if self.channels == 3 and (raw.ndim != 4 or raw.shape[-1] != 3):
-            raise ValueError('Frozen probes require RGB inputs: use original AVI or RGB NPY, not grayscale NPY.')
-        if path.suffix not in {'.npy','.npz'} and raw.ndim == 4:
-            raw = raw[..., ::-1].copy()
+        if path is None:
+            raise FileNotFoundError(sample['stem'])
+        raw = read_echo_input(path, self.input_protocol)
         center = sample['frame']
         if not 0 <= center < len(raw):
             raise ValueError(f'Tracing frame out of bounds: {sample["stem"]}, {center}')
@@ -369,14 +369,17 @@ def main():
     seed_everything(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model, cfg, metadata = load_model(args.checkpoint, device)
+    args.input_protocol = metadata['input_protocol']
     model.requires_grad_(False).eval()
     seed_everything(args.seed)
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
     train = TemporalEchoDataset(args.data_root, 'train', args.audit_frames, channels=model.in_chans,
-                               limit=args.ef_train_cases, seed=args.seed, random_start=False)
+                               limit=args.ef_train_cases, seed=args.seed, random_start=False,
+                               input_protocol=args.input_protocol)
     val = TemporalEchoDataset(args.data_root, 'val', args.audit_frames, channels=model.in_chans,
-                             limit=args.ef_val_cases, seed=args.seed, random_start=False)
+                             limit=args.ef_val_cases, seed=args.seed, random_start=False,
+                             input_protocol=args.input_protocol)
     if set(train.ids) & set(val.ids):
         raise ValueError('Train/validation case overlap.')
     modes = ('normal', 'reset', 'shuffle', 'reset_2', 'reset_4') if isinstance(model, TemporalMAE) and model.memory_mode != 'none' else ('normal',)

@@ -95,6 +95,7 @@ def load_model(path: str, device: torch.device) -> tuple[nn.Module, dict[str, An
         "epoch": int(ckpt.get("epoch", -1)) if isinstance(ckpt, dict) else -1,
         "global_step": int(ckpt.get("global_step", -1)) if isinstance(ckpt, dict) else -1,
         "model_name": name,
+        "input_protocol": cfg.get("data", {}).get("input_protocol", "rgb"),
         "parameters": int(sum(p.numel() for p in model.parameters())),
         "trainable_parameters": int(sum(p.numel() for p in model.parameters() if p.requires_grad)),
         "checkpoint_mb": Path(path).stat().st_size / (1024**2),

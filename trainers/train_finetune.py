@@ -184,6 +184,7 @@ def build_dataset(cfg: dict[str, Any], task: str, split: str):
             per_frame_random=per_frame,
             seed=seed,
             limit=limit,
+            input_protocol=data_cfg.get('input_protocol'),
         )
     if task == "echonet_seg":
         return EchoNetSegmentationDataset(
@@ -195,6 +196,7 @@ def build_dataset(cfg: dict[str, Any], task: str, split: str):
             limit=limit,
             frames=int(model_cfg.get("frames", 1)),
             use_temporal_context=bool(model_cfg.get("seg_use_temporal_context", False)),
+            input_protocol=data_cfg.get('input_protocol'),
         )
     if task == "camus_seg":
         return CAMUSSegmentationDataset(

@@ -69,13 +69,13 @@ Ctrl+C的interrupt带partial_epoch标记，不能用它跳过未完成epoch继�
 显式更改频率，不改yaml：
 
 ```bash
-bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 --save_last_every 20
+bash scripts/run_temporal_research.sh --run_tag temporal_gray_s42 --save_last_every 20
 ```
 
 若希望400轮后精确延长训练，或以后对中间阶段新增探针，务必事先保留相应文件：
 
 ```bash
-bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 +  --keep_stage_checkpoints --keep_completed_resume
+bash scripts/run_temporal_research.sh --run_tag temporal_gray_s42 --keep_stage_checkpoints --keep_completed_resume
 ```
 
 这两个开关增加占用，且不能恢复已经删除的文件。省空间默认只保留最终预训练模型和可选下游best，够推理及新建下游训练，不等于保留原优化器的延长训练状态。
@@ -85,7 +85,7 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 +  --keep_stage_
 停止旧进程后，使用同一run_tag、完全相同的训练参数，加--migrate_legacy_layout。以旧数据来源为RGB缓存的运行举例：
 
 ```bash
-bash scripts/run_temporal_research.sh +  --run_tag temporal_v1_s42 +  --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb +  --migrate_legacy_layout
+bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 --input_protocol rgb --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb --migrate_legacy_layout
 ```
 
 只迁移上一版本的时域runner，不迁移历史无效baseline400实验。它将该run_tag的原实验目录拆分到result/、ckpt/，同一文件系统内移动，不额外复制权重。遇到目标同名文件拒绝覆盖；不在旧训练仍运行时操作。checkpoint内部历史路径和旧日志保留，不改写已有实验证据；后续训练使用新的显式路径。
@@ -94,20 +94,20 @@ bash scripts/run_temporal_research.sh +  --run_tag temporal_v1_s42 +  --data_roo
 
 ## 不生成RGB缓存
 
-按用户最新选择，默认复用/root/autodl-tmp/datasets/EchoNet-Dynamic-rgb，不重复生成。它保留完整解码帧，改变模型、mask比例或训练clip长度通常不需要重建同一缓存；若改变数据源、缓存预处理或发现损坏则另行核验。没有--prepare_rgb_cache就不调用缓存生成工具。
+按用户最终选择，默认复用/root/autodl-tmp/datasets/EchoNet-Dynamic中的灰度NPY，协议gray_repeat3，采样后在内存扩展三通道，不改模型结构或初始化权重。无需RGB目录；改变模型、mask比例或clip长度通常不需重建此缓存。
 
-可选直接读取/root/autodl-fs/datasets/EchoNet-Dynamic的原始AVI，在线解码RGB；需要根目录含FileList.csv、VolumeTracings.csv与Videos/：
+可选读取/root/autodl-fs/datasets/EchoNet-Dynamic的原始AVI后转灰度；需根目录含FileList.csv、VolumeTracings.csv与Videos/。本轮推荐直接用本地灰度NPY：
 
 ```bash
-bash scripts/run_temporal_research.sh --run_tag temporal_raw_s42 --smoke +  --data_root /root/autodl-fs/datasets/EchoNet-Dynamic
+bash scripts/run_temporal_research.sh --run_tag temporal_gray_s42 --smoke --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic
 ```
 
 冒烟通过后去掉--smoke跑正式版；smoke自动用独立smoke_前缀目录。
 
-三通道输入是模型/权重对齐的选择，磁盘缓存是速度优化，两者不是一回事。灰度NPY在线复制成三通道同样可以很快，模型也能训练；当前严格RGB协议未启用此替代，不能称它与原RGB完全等价。在线解码AVI才会增加解码CPU负担，文件存储读取也可能较慢。当前保持RGB缓存协议不变。
+灰度协议已启用，训练和评价统一使用。保留三通道模型的权重结构与mean/std，不把首层权重求平均改为单通道。它不是原始RGB逐像素复现，因此必须使用新run_tag，不能接续或混入原RGB实验。
 
-旧灰度目录不是这次默认入口的必需品，但可能被其他项目和历史续训引用，而且可能混有原始Videos等内容。不能只凭目录名就整目录删除。先确认其他项目引用、内部内容及原始数据备份，再决定是否只清理其中可重建的旧npy文件。本轮不自动删灰度或RGB数据目录。
+原有灰度目录现在就是本轮训练数据，请保留。它也可能被其他项目引用，不能整目录删除。本轮不会生成或自动删除任何数据缓存。
 
-已有RGB缓存不会自动删除。人工释放前先确认没有训练/评估在使用、原始AVI完整可用且不再需要用原缓存续跑。仅知道某个目录63GB不足以授权自动清除它。
+用户已经删除RGB缓存也不影响新灰度实验。若另有旧RGB实验，其原续训命令不再适用；不能给同一run_tag换输入来源继续当作原实验。
 
 保存checkpoint时额外要求2GiB空闲储备，另计即将写入的临时文件。--min_free_gb可修改储备。这是提前报错保护旧last，不是实际空间预留或无限容量保证。日志、其他项目、数据缓存也会占空间；先检查df -h与df -i。

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
+from .echo_input import read_echo_input
 
 from augment.ultrasound import EchoAugmentConfig, resize_with_pad
 from echo_aug_validation.augment_recipes import augment_image_mask, augment_video, resize_mask_with_pad
@@ -162,8 +163,10 @@ class EchoNetEFDataset(Dataset):
         per_frame_random: bool = False,
         seed: int = 0,
         limit: int | None = None,
+        input_protocol: str | None = None,
     ):
         self.root = Path(root)
+        self.input_protocol = input_protocol
         self.df = load_echonet_filelist(self.root, split)
         if "EF" not in self.df.columns:
             raise ValueError(f"EF column not found in {self.root / 'FileList.csv'}")
@@ -186,7 +189,7 @@ class EchoNetEFDataset(Dataset):
         path = find_echonet_video(self.root, file_name)
         if path is None:
             raise FileNotFoundError(f"Cannot find EchoNet video for {file_name!r} under {self.root}")
-        video = read_video(path)
+        video = read_echo_input(path, self.input_protocol) if self.input_protocol else read_video(path)
         video = sample_frames(video, self.frames)
         if self.aug_cfg is not None:
             video = augment_video(video, self.aug_cfg, self.seed + index * 997, self.per_frame_random)
@@ -208,8 +211,10 @@ class EchoNetSegmentationDataset(Dataset):
         limit: int | None = None,
         frames: int = 1,
         use_temporal_context: bool = False,
+        input_protocol: str | None = None,
     ):
         self.root = Path(root)
+        self.input_protocol = input_protocol
         self.img_size = int(img_size)
         self.aug_cfg = aug_cfg
         self.seed = int(seed)
@@ -243,7 +248,7 @@ class EchoNetSegmentationDataset(Dataset):
         path = find_echonet_video(self.root, sample["stem"])
         if path is None:
             raise FileNotFoundError(f"Cannot find EchoNet video for {sample['stem']!r} under {self.root}")
-        video = read_video(path)
+        video = read_echo_input(path, self.input_protocol) if self.input_protocol else read_video(path)
         gray_video = to_grayscale(video)
         frame_idx = min(max(int(sample["frame"]), 0), gray_video.shape[0] - 1)
         image = gray_video[frame_idx]

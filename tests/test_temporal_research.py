@@ -22,6 +22,7 @@ from models.video_mae import flat_sinusoid, EchoVideoMAE, tubelet_patchify
 from models.downstream import EchoEFFineTuner, EchoSegFineTuner, segmentation_metrics
 from utils.datasets import build_rmae_dataset
 from utils.temporal_data import TemporalEchoDataset
+from utils.echo_input import read_echo_input
 from utils.pretrained_init import load_videomae_init
 from utils.checkpoint import save_checkpoint, load_checkpoint
 from utils.config import load_config
@@ -69,6 +70,26 @@ class TemporalTests(unittest.TestCase):
             torch.testing.assert_close(a['video'],b['video'],rtol=0,atol=0)
             torch.testing.assert_close(a['frame_indices'],b['frame_indices'])
             self.assertGreater(float(a['video'][:,0].mean()),float(a['video'][:,2].mean()))
+            gray_root = root/'gray'
+            (gray_root/'npy').mkdir(parents=True)
+            (gray_root/'FileList.csv').write_text('FileName,EF,Split\na,55,VAL\n')
+            np.save(gray_root/'npy/a.npy',cache_decode(path,grayscale=True))
+            from_raw = read_echo_input(path,'gray_repeat3')
+            from_cache = read_echo_input(gray_root/'npy/a.npy','gray_repeat3')
+            self.assertIsInstance(from_cache,np.memmap)
+            self.assertFalse(from_cache.flags.writeable)
+            np.testing.assert_array_equal(from_raw,from_cache)
+            gray = TemporalEchoDataset(gray_root,'val',4,img_size=16,channels=3,
+                                       two_views=True,input_protocol='gray_repeat3')[0]
+            for key in ('video','video_view2'):
+                torch.testing.assert_close(gray[key][:,0],gray[key][:,1],rtol=0,atol=0)
+                torch.testing.assert_close(gray[key][:,0],gray[key][:,2],rtol=0,atol=0)
+            self.assertEqual(gray['input_protocol'],'gray_repeat3')
+            torch.testing.assert_close(gray['video'][:,0],
+                                       torch.from_numpy(from_raw[gray['frame_indices'].numpy()]).float()/255)
+            with self.assertRaisesRegex(ValueError,'RGB protocol'):
+                read_echo_input(gray_root/'npy/a.npy','rgb')
+            from_cache._mmap.close()
 
     def test_modes_backward_amp_and_reset(self):
         for mode in ('none', 'global', 'spatial', 'dual'):
@@ -290,7 +311,7 @@ class TemporalTests(unittest.TestCase):
                 case = f'case{i:02d}'
                 split = 'TRAIN' if i < 8 else 'VAL'
                 files.append(f'{case},{40+i*2},{split}')
-                raw = np.random.default_rng(i).integers(0,255,(32,112,112,3),dtype=np.uint8)
+                raw = np.random.default_rng(i).integers(0,255,(32,112,112),dtype=np.uint8)
                 np.save(root/'npy'/f'{case}.npy',raw)
                 for frame, width in ((8,25),(24,15)):
                     for y in (20,30,50,70,90):
@@ -300,7 +321,7 @@ class TemporalTests(unittest.TestCase):
             model_cfg = tiny(local_frames=4,clip_count=2)
             model_cfg.update(name='temporal_mae',img_size=112,patch_size=8,gradient_checkpointing=True)
             cfg = dict(experiment=dict(seed=42), model=model_cfg,
-                       data=dict(loader='echonet',sampling_protocol='temporal_v1',data_root=str(root),
+                       data=dict(loader='echonet',sampling_protocol='temporal_v1',input_protocol='gray_repeat3',data_root=str(root),
                                  num_workers=0,drop_last=True),
                        train=dict(epochs=1,batch_size=2,max_steps=2,val_interval=1,plot_interval=1,
                                   grad_accum_steps=1,mixed_precision=False),
@@ -319,6 +340,7 @@ class TemporalTests(unittest.TestCase):
             self.assertFalse((run/'checkpoints').exists())
             self.assertTrue((ckpt/'epoch_0000.pt').exists())
             first = torch.load(ckpt/'last.pt',weights_only=False)
+            self.assertEqual(first['config']['data']['input_protocol'],'gray_repeat3')
             subprocess.run(command+['--epochs','2','--checkpoint_epochs','1 2'],cwd=project,env=env,
                            check=True,capture_output=True,text=True)
             second = torch.load(ckpt/'last.pt',weights_only=False)
@@ -331,13 +353,14 @@ class TemporalTests(unittest.TestCase):
             result = subprocess.run(command,cwd=project,env=env,capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
             metrics = json.loads((audit/'metrics.json').read_text())
+            self.assertEqual(metrics['protocol']['input_protocol'],'gray_repeat3')
             self.assertEqual(metrics['metadata']['missing_keys'],0)
             self.assertIn('reset',metrics['interventions'])
             self.assertIn('state_only_ef',metrics)
             self.assertIn('state_only_seg_dice',metrics['segmentation'])
             self.assertTrue((audit/'ef_predictions.csv').exists())
             fine_cfg = dict(experiment=dict(seed=42),model=dict(img_size=112,frames=8),
-                            data=dict(data_root=str(root),num_workers=0),
+                            data=dict(data_root=str(root),num_workers=0,input_protocol='gray_repeat3'),
                             train=dict(epochs=1,batch_size=2,max_steps=2,mixed_precision=False),
                             optimizer=dict(name='adamw',lr=.001),scheduler=dict(name='none'),
                             checkpoint=dict(auto_resume=True,save_every_n_epochs=0,best_weights_only=True),

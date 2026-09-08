@@ -7,8 +7,9 @@
 入口为 `bash scripts/run_temporal_research.sh`，默认9组，`--suite full`为37组；
 正式运行前加 `--smoke` 验证真实数据链路。新实验必须使用新run_tag，不接续旧的单帧/视频混合基线。
 
-默认复用已有的本地RGB缓存，不重复生成；仅显式加 `--prepare_rgb_cache` 才调用缓存工具。
-也可用 `--data_root` 指向原始AVI根目录在线解码，不必新增缓存。
+默认复用原有灰度NPY：`/root/autodl-tmp/datasets/EchoNet-Dynamic`，协议为 `gray_repeat3`。
+先抽帧，再在内存中扩展三通道；保留预训练模型结构，不生成RGB缓存。训练和全部评价统一灰度输入。
+灰度实验必须使用新run_tag，不能接续旧RGB实验。快速运行命令见 [灰度训练说明](docs/temporal_gray_run.md)。
 输出顶层分 `result/` 与 `ckpt/`；last默认每10轮覆盖，阶段权重成功评估后清理、最终模型保留。
 旧时域运行迁移、断点续训和保留开关见 [保存与空间说明](docs/temporal_storage_and_resume.md)。
 

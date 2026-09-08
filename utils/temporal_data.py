@@ -8,12 +8,13 @@ import torch
 from torch.utils.data import Dataset
 
 from .datasets import _as_video_tensor
-from echo_aug_validation.io_utils import load_echonet_filelist, find_echonet_video, read_video
+from echo_aug_validation.io_utils import load_echonet_filelist, find_echonet_video
+from .echo_input import INPUT_PROTOCOLS, read_echo_input
 
 
 class TemporalEchoDataset(Dataset):
     def __init__(self, root, split, frames, img_size=112, channels=3, sampling_rate=1,
-                 limit=None, seed=42, two_views=False, random_start=None):
+                 limit=None, seed=42, two_views=False, random_start=None, input_protocol='rgb'):
         self.root = Path(root)
         self.df = load_echonet_filelist(self.root, split)
         # A seeded permutation prevents prefix selection from depending on file ordering.
@@ -21,6 +22,9 @@ class TemporalEchoDataset(Dataset):
         if limit is not None:
             self.df = self.df.iloc[:int(limit)]
         self.frames, self.img_size, self.channels = int(frames), int(img_size), int(channels)
+        self.input_protocol = input_protocol
+        if input_protocol not in INPUT_PROTOCOLS or (input_protocol == 'gray_repeat3' and self.channels != 3):
+            raise ValueError('gray_repeat3 keeps the three-channel model; use channels=3.')
         self.stride, self.seed, self.two_views = int(sampling_rate), int(seed), bool(two_views)
         self.epoch = multiprocessing.Value('i', 0)
         self.random_start = split.lower() == 'train' if random_start is None else random_start
@@ -54,16 +58,11 @@ class TemporalEchoDataset(Dataset):
         path = find_echonet_video(self.root, str(row.FileName))
         if path is None:
             raise FileNotFoundError(row.FileName)
-        raw = np.load(path, mmap_mode='r') if path.suffix == '.npy' else read_video(path)
-        if self.channels == 3 and (raw.ndim != 4 or raw.shape[-1] != 3):
-            raise ValueError(f'{path}: RGB research input requires [T,H,W,3]. '
-                             'Point --data_root to the original AVI directory (no cache needed), '
-                             'or an existing RGB NPY root. Do not use the grayscale cache.')
-        if path.suffix not in {'.npy','.npz'} and raw.ndim == 4:
-            raw = raw[..., ::-1].copy()
+        raw = read_echo_input(path, self.input_protocol)
         video, valid, indices = self.sample(raw, index)
         sample = dict(video=video, frame_valid=valid, frame_indices=indices, id=self.ids[index],
-                      target=torch.tensor(float(row.EF)), dataset='echonet', source_path=str(path))
+                      target=torch.tensor(float(row.EF)), dataset='echonet', source_path=str(path),
+                      input_protocol=self.input_protocol)
         if self.two_views:
             sample['video_view2'], _, _ = self.sample(raw, index, 1)
         return sample

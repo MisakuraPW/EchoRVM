@@ -164,7 +164,8 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
         dataset = TemporalEchoDataset(
             data_cfg['data_root'], split, frames, img_size, in_chans,
             int(model_cfg.get('sampling_rate', 1)), data_cfg.get('limit'),
-            int(cfg.get('experiment', {}).get('seed', 42)), bool(model_cfg.get('two_views', False)))
+            int(cfg.get('experiment', {}).get('seed', 42)), bool(model_cfg.get('two_views', False)),
+            input_protocol=data_cfg.get('input_protocol', 'rgb'))
     else:
         dataset = build_rmae_dataset(data_cfg, model_cfg, split, seed=int(cfg.get("experiment", {}).get("seed", 42)))
     augment_cfg = cfg.get("augment", {})
