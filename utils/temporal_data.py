@@ -56,7 +56,9 @@ class TemporalEchoDataset(Dataset):
             raise FileNotFoundError(row.FileName)
         raw = np.load(path, mmap_mode='r') if path.suffix == '.npy' else read_video(path)
         if self.channels == 3 and (raw.ndim != 4 or raw.shape[-1] != 3):
-            raise ValueError(f'{path}: RGB research input requires [T,H,W,3]. Rebuild using cache_echonet_npy.py --rgb.')
+            raise ValueError(f'{path}: RGB research input requires [T,H,W,3]. '
+                             'Point --data_root to the original AVI directory (no cache needed), '
+                             'or an existing RGB NPY root. Do not use the grayscale cache.')
         if path.suffix not in {'.npy','.npz'} and raw.ndim == 4:
             raw = raw[..., ::-1].copy()
         video, valid, indices = self.sample(raw, index)

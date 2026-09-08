@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import copy
-import hashlib
 import json
 import os
 import subprocess
@@ -19,6 +18,8 @@ sys.path.insert(0, str(ROOT))
 import yaml
 from utils.config import load_config
 from tools.evaluate_temporal_mae import write_csv, bootstrap_mean
+from utils.research_storage import (check_protocol, prepare_layout, prune_audited_snapshot,
+                                    prune_completed_resume, remove_owned_checkpoint)
 
 
 def experiment_matrix(suite):
@@ -57,7 +58,8 @@ def make_config(kind, name, changes, args):
                         require_init_complete_encoder=True)
     cfg['checkpoint'].update(save_initial=True, save_epochs=args.audit_epochs[1:],
                              save_every_n_epochs=0, save_best=False, save_last=True, auto_resume=True,
-                             epoch_name_width=4)
+                             epoch_name_width=4, save_last_every_n_epochs=args.save_last_every,
+                             min_free_gb=args.min_free_gb)
     cfg['train'].update(epochs=args.epochs, batch_size=args.batch_size, grad_accum_steps=args.grad_accum_steps,
                         plot_interval=5, val_interval=5)
     if kind != 'temporal':
@@ -215,7 +217,8 @@ def main():
     parser.add_argument('--suite', choices=('core', 'full'), default='core')
     parser.add_argument('--run_tag', default=os.environ.get('RUN_TAG', 'temporal_' + datetime.now().strftime('%Y%m%d_%H%M%S')))
     parser.add_argument('--output_root', default='/root/autodl-tmp/outputs_temporal')
-    parser.add_argument('--data_root', default='/root/autodl-tmp/datasets/EchoNet-Dynamic')
+    parser.add_argument('--data_root', default=None,
+                        help='Existing data root. Default: local EchoNet-Dynamic-rgb cache; no new cache is generated.')
     parser.add_argument('--prepare_rgb_cache', action='store_true')
     parser.add_argument('--source_root', default='/root/autodl-fs/datasets/EchoNet-Dynamic')
     parser.add_argument('--init_checkpoint', default='ckpt/mae/videomae_vit_s.pth')
@@ -235,8 +238,22 @@ def main():
     parser.add_argument('--no_audit', action='store_true')
     parser.add_argument('--anchors', choices=('none','baselines','core'), default='none',
                         help='Optional full fine-tuning at the final checkpoint; frozen probes remain primary.')
+    parser.add_argument('--save_last_every', type=int, default=10,
+                        help='Overwrite resumable last.pt every N epochs; also first/final/evaluation epochs.')
+    parser.add_argument('--min_free_gb', type=float, default=2,
+                        help='Free GiB reserve required in addition to a temporary checkpoint write.')
+    parser.add_argument('--keep_stage_checkpoints', action='store_true',
+                        help='Keep epoch 0/intermediate snapshots even after successful audits.')
+    parser.add_argument('--keep_completed_resume', action='store_true',
+                        help='Keep full last.pt/interrupt.pt after an experiment fully completes.')
+    parser.add_argument('--migrate_legacy_layout', action='store_true',
+                        help='Move this run_tag old mixed layout into result/ and ckpt/. Stop active jobs first.')
     parser.add_argument('--summarize_only', action='store_true')
     args = parser.parse_args()
+    if args.save_last_every < 1 or args.min_free_gb < 0:
+        parser.error('--save_last_every must be positive and --min_free_gb must be nonnegative')
+    if args.data_root is None:
+        args.data_root = '/root/autodl-tmp/datasets/EchoNet-Dynamic-rgb'
     if args.prepare_rgb_cache and not args.data_root.endswith('-rgb'):
         args.data_root += '-rgb'
     if args.smoke:
@@ -249,8 +266,11 @@ def main():
         unknown = set(args.only) - {name for name, _, _ in entries}
         if unknown:
             raise ValueError(f'Unknown experiments: {unknown}')
-    root = Path(args.output_root) / args.run_tag
+    run_root = Path(args.output_root) / args.run_tag
+    root, ckpt_root = run_root / 'result', run_root / 'ckpt'
     if args.summarize_only:
+        root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full')],
+                                         migrate=args.migrate_legacy_layout)
         summarize(root)
         archive_analysis(root)
         return
@@ -259,9 +279,13 @@ def main():
         m = cfg['model']
         print(f'{i:02d} {name:34s} T={m["frames"]:3d} local={m.get("local_frames", m["frames"]):2d} '
               f'memory={m.get("memory_mode", "none"):7s} epochs={args.epochs}')
-    print(f'Experiments={len(entries)}; output={root}; baseline old results will NOT be reused.')
+    print(f'Experiments={len(entries)}; result={root}; ckpt={ckpt_root}; baseline old results will NOT be reused.')
+    print(f'Data={args.data_root}; prepare_rgb_cache={args.prepare_rgb_cache}; '
+          f'last_every={args.save_last_every}; keep_stages={args.keep_stage_checkpoints}')
     if args.dry_run:
         return
+    root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full')],
+                                     migrate=args.migrate_legacy_layout)
     if not Path(args.init_checkpoint).is_file():
         raise FileNotFoundError(args.init_checkpoint)
     if not args.no_audit or args.anchors != 'none':
@@ -289,7 +313,8 @@ def main():
     (root/'input_contract.json').write_text(json.dumps(dict(
         video_shape=list(preflight['video'].shape),source_path=preflight['source_path'],
         valid_frames=int(preflight['frame_valid'].sum()),data_root=args.data_root,
-        color_contract='RGB cache; AVI read as BGR and converted to RGB'),indent=2),encoding='utf-8')
+        color_contract='RGB NPY or original AVI decoded BGR then converted to RGB; no grayscale replication'),
+        indent=2),encoding='utf-8')
     timings = []
     if (root / 'stage_times.csv').exists():
         import csv
@@ -302,10 +327,10 @@ def main():
             continue
         destination = root / name
         destination.mkdir(exist_ok=True)
-        digest = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
+        checkpoint_dir = ckpt_root / name
+        cfg['checkpoint']['dir'] = str(checkpoint_dir)
+        digest = check_protocol(destination, cfg)
         identity = destination / 'protocol.sha256'
-        if identity.exists() and identity.read_text().strip() != digest:
-            raise RuntimeError(f'{name}: changed configuration under same run_tag. Use a new run_tag.')
         identity.write_text(digest + '\n')
         config_path = destination / 'requested_config.yaml'
         config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding='utf-8')
@@ -314,7 +339,7 @@ def main():
             cmd = [sys.executable, 'trainers/train_rmae.py', '--config', str(config_path),
                    '--output_dir', str(destination)]
             run_command(cmd, name + '/pretrain', root, timings)
-            final = destination / 'checkpoints' / f'epoch_{args.epochs:04d}.pt'
+            final = checkpoint_dir / f'epoch_{args.epochs:04d}.pt'
             if not final.exists():
                 raise RuntimeError(f'Incomplete training: {final} missing.')
             complete.write_text(digest + '\n')
@@ -322,8 +347,15 @@ def main():
             for epoch in args.audit_epochs:
                 audit = destination / 'audit' / f'epoch_{epoch:04d}'
                 if (audit / 'DONE').exists():
+                    if not (audit / 'metrics.json').is_file():
+                        raise RuntimeError(f'Audit marker without metrics: {audit}')
+                    prune_audited_snapshot(checkpoint_dir, destination, epoch, args.epochs,
+                                           keep=args.keep_stage_checkpoints)
                     continue
-                checkpoint = destination / 'checkpoints' / f'epoch_{epoch:04d}.pt'
+                checkpoint = checkpoint_dir / f'epoch_{epoch:04d}.pt'
+                if not checkpoint.is_file():
+                    raise FileNotFoundError(f'Missing unaudited snapshot: {checkpoint}. '
+                                            'Pruned snapshots cannot be re-evaluated; preserve existing audit results.')
                 cmd = [sys.executable, 'tools/evaluate_temporal_mae.py', '--checkpoint', str(checkpoint),
                        '--data_root', args.data_root, '--output_dir', str(audit),
                        '--batch_size', str(args.audit_batch_size), '--num_workers', str(args.num_workers),
@@ -332,24 +364,33 @@ def main():
                     cmd.append('--smoke')
                 run_command(cmd, name + f'/audit{epoch}', root, timings)
                 summarize(root)
+                prune_audited_snapshot(checkpoint_dir, destination, epoch, args.epochs,
+                                       keep=args.keep_stage_checkpoints)
         anchor_names = {entry[0] for entry in experiment_matrix('core')}
         run_anchor = args.anchors == 'core' and name in anchor_names
         run_anchor = run_anchor or (args.anchors == 'baselines' and name in {'echocardmae_video_port','videomae_matched','videomae_standard'})
         if run_anchor:
             for task in ('echonet_ef','echonet_seg'):
                 anchor_dir = destination / 'full_finetune' / task
+                anchor_ckpt = checkpoint_dir / 'full_finetune' / task
                 if (anchor_dir / 'DONE').exists():
+                    if not args.keep_completed_resume and (anchor_ckpt / 'best.pt').is_file():
+                        for file in ('last.pt', 'interrupt.pt'):
+                            remove_owned_checkpoint(anchor_ckpt / file, checkpoint_dir, anchor_dir,
+                                                    'fine-tuning completed; best model retained')
                     continue
                 anchor_dir.mkdir(parents=True,exist_ok=True)
                 anchor = load_config(ROOT/'configs'/f'finetune_{task}.yaml')
-                anchor['model'].update(backbone_checkpoint=str(destination/'checkpoints'/f'epoch_{args.epochs:04d}.pt'),
+                anchor['model'].update(backbone_checkpoint=str(checkpoint_dir/f'epoch_{args.epochs:04d}.pt'),
                                        frames=cfg['model']['frames'],img_size=112,seg_use_temporal_context=True,
                                        strict_backbone=True)
                 anchor['data'].update(data_root=args.data_root,num_workers=args.num_workers)
                 anchor['experiment']['seed'] = args.seed
                 # Full-token video fine-tuning is much larger than masked MAE.
                 anchor['train'].update(batch_size=2,grad_accum_steps=16)
-                anchor['checkpoint'].update(auto_resume=True,save_every_n_epochs=0)
+                anchor['checkpoint'].update(auto_resume=True,save_every_n_epochs=0,dir=str(anchor_ckpt),
+                                            save_last_every_n_epochs=args.save_last_every,
+                                            best_weights_only=True,min_free_gb=args.min_free_gb)
                 if args.smoke:
                     anchor['train'].update(epochs=1,max_steps=2,batch_size=2,grad_accum_steps=1)
                 anchor_config = anchor_dir/'requested_config.yaml'
@@ -358,6 +399,12 @@ def main():
                              '--config',str(anchor_config),'--output_dir',str(anchor_dir)],
                             name+'/'+task,root,timings)
                 (anchor_dir/'DONE').write_text('completed\n')
+                if not args.keep_completed_resume and (anchor_ckpt / 'best.pt').is_file():
+                    for file in ('last.pt', 'interrupt.pt'):
+                        remove_owned_checkpoint(anchor_ckpt / file, checkpoint_dir, anchor_dir,
+                                                'fine-tuning completed; best model retained')
+        prune_completed_resume(checkpoint_dir, destination, args.epochs, args.audit_epochs,
+                               keep=args.keep_completed_resume, audited=not args.no_audit)
     summarize(root)
     archive_analysis(root)
     print(f'Completed selected stages. Reports: {root}')

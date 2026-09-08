@@ -28,7 +28,7 @@ from tqdm import tqdm
 from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae, build_echocardmae_video
 from optim import build_optimizer
 from utils.augmentation import AugmentedVideoDataset, EchoVideoAugmenter, build_echo_augment_config
-from utils.checkpoint import checkpoint_epoch_name, configured_checkpoint_epochs, find_last_checkpoint, load_checkpoint, save_checkpoint
+from utils.checkpoint import checkpoint_directory, checkpoint_epoch_name, configured_checkpoint_epochs, find_last_checkpoint, load_checkpoint, save_checkpoint, should_save_last
 from utils.config import load_config, resolve_output_root, save_config
 from utils.datasets import build_rmae_dataset
 from utils.early_stopping import EarlyStopping
@@ -70,6 +70,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train recurrent echocardiography MAE.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--output_dir", default=None)
+    parser.add_argument("--checkpoint_dir", default=None)
+    parser.add_argument("--save_last_every", type=int, default=None)
     parser.add_argument("--resume", default=None)
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--eval_only", action="store_true")
@@ -105,6 +107,8 @@ def apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> list[s
     set_value("model", "frames", args.frames)
     set_value("model", "init_checkpoint", args.init_checkpoint)
     set_value("checkpoint", "save_every_n_epochs", args.save_every_n_epochs)
+    set_value("checkpoint", "dir", args.checkpoint_dir)
+    set_value("checkpoint", "save_last_every_n_epochs", args.save_last_every)
     if args.checkpoint_epochs is not None:
         values = [int(item) for item in str(args.checkpoint_epochs).replace(",", " ").split() if item.strip()]
         cfg.setdefault("checkpoint", {})["save_epochs"] = values
@@ -133,8 +137,9 @@ def make_run_dir(cfg: dict[str, Any], output_dir: str | None) -> Path:
         output_root = resolve_output_root(exp.get("output_root", "outputs"))
         stamp = datetime.now().strftime("run_%Y-%m-%d_%H-%M-%S")
         run_dir = output_root / exp.get("name", "rmae") / stamp
-    for sub in ["logs", "checkpoints", "plots", "tensorboard", "samples"]:
+    for sub in ["logs", "plots", "tensorboard", "samples"]:
         (run_dir / sub).mkdir(parents=True, exist_ok=True)
+    checkpoint_directory(run_dir, cfg).mkdir(parents=True, exist_ok=True)
     return run_dir
 
 
@@ -380,10 +385,12 @@ def main() -> int:
     cli_overrides = apply_cli_overrides(cfg, args)
     seed_everything(int(cfg.get("experiment", {}).get("seed", 42)))
     run_dir = make_run_dir(cfg, args.output_dir)
+    ckpt_dir = checkpoint_directory(run_dir, cfg)
     shutil.copy2(args.config, run_dir / "config_source.yaml")
     save_config(cfg, run_dir / "config.yaml")
     logger = setup_logger(run_dir / "logs" / "train.log")
     logger.info("run_dir=%s", run_dir)
+    logger.info("checkpoint_dir=%s", ckpt_dir)
     logger.info("command=%s", " ".join(sys.argv))
     if cli_overrides:
         logger.info("cli_overrides=%s", ", ".join(cli_overrides))
@@ -481,12 +488,14 @@ def main() -> int:
     start_epoch = 1
     global_step = 0
     best_metric = None
+    resume_state = {}
     resume_path = args.resume or cfg.get("checkpoint", {}).get("resume")
     if not resume_path and cfg.get("checkpoint", {}).get("auto_resume", False):
-        last = find_last_checkpoint(run_dir)
+        last = find_last_checkpoint(run_dir, cfg)
         resume_path = str(last) if last else None
     if resume_path:
         ckpt = load_checkpoint(resume_path, model, optimizer, scheduler, scaler, map_location=device)
+        resume_state = ckpt.get('early_stopping', {})
         start_epoch = int(ckpt.get("epoch", 0)) + 1
         global_step = int(ckpt.get("global_step", 0))
         best_metric = ckpt.get("best_metric")
@@ -512,13 +521,16 @@ def main() -> int:
         enabled=bool(early_cfg.get("enabled", val_loader is not None)),
     )
     epochs = int(cfg.get("train", {}).get("epochs", 1))
+    if resume_state:
+        stopper.best = resume_state.get('best')
+        stopper.bad_epochs = int(resume_state.get('bad_epochs', 0))
     plot_interval = int(cfg.get("train", {}).get("plot_interval", 1))
     save_every = int(ckpt_cfg.get("save_every_n_epochs", 5))
     fixed_save_epochs = configured_checkpoint_epochs(ckpt_cfg)
     epoch_name_width = int(ckpt_cfg.get("epoch_name_width", 3))
     eval_ckpt_cfg = eval_checkpoint_config(cfg)
     if ckpt_cfg.get('save_initial', False) and start_epoch == 1 and not args.eval_only:
-        save_checkpoint(run_dir / 'checkpoints' / 'epoch_0000.pt', model, optimizer,
+        save_checkpoint(ckpt_dir / 'epoch_0000.pt', model, optimizer,
                         scheduler, scaler, 0, 0, None, eval_ckpt_cfg)
     if fixed_save_epochs:
         logger.info("fixed_checkpoint_epochs=%s", sorted(fixed_save_epochs))
@@ -572,13 +584,15 @@ def main() -> int:
                 improved = metric_value > float(best_metric)
             if improved:
                 best_metric = metric_value
-            if ckpt_cfg.get("save_last", True):
-                save_checkpoint(run_dir / "checkpoints" / "last.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
+            stopping = bool(val_metrics and stopper.step(float(metric_value)))
+            if should_save_last(cfg, epoch, epochs, stopping=stopping):
+                save_checkpoint(ckpt_dir / "last.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg,
+                                extra={'early_stopping': {'best': stopper.best, 'bad_epochs': stopper.bad_epochs}})
             if ckpt_cfg.get("save_best", True) and improved:
-                save_checkpoint(run_dir / "checkpoints" / "best.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
+                save_checkpoint(ckpt_dir / "best.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
             if epoch in fixed_save_epochs:
                 save_checkpoint(
-                    run_dir / "checkpoints" / checkpoint_epoch_name(epoch, epoch_name_width),
+                    ckpt_dir / checkpoint_epoch_name(epoch, epoch_name_width),
                     model,
                     optimizer,
                     scheduler,
@@ -589,21 +603,22 @@ def main() -> int:
                     eval_ckpt_cfg,
                 )
             elif save_every > 0 and epoch % save_every == 0:
-                save_checkpoint(run_dir / "checkpoints" / checkpoint_epoch_name(epoch, epoch_name_width), model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
+                save_checkpoint(ckpt_dir / checkpoint_epoch_name(epoch, epoch_name_width), model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
             if cfg.get("logging", {}).get("save_plots", True) and epoch % plot_interval == 0:
                 try:
                     plot_loss_curves(run_dir / "logs" / "metrics.csv", run_dir / "plots" / "loss_latest.png")
                     plot_loss_curves(run_dir / "logs" / "metrics.csv", run_dir / "plots" / f"loss_epoch_{epoch:03d}.png")
                 except Exception as exc:
                     logger.warning("plot failed: %s", exc)
-            if val_metrics and stopper.step(float(metric_value)):
+            if stopping:
                 logger.info("early stopping at epoch=%d monitor=%s value=%.6f", epoch, monitor, metric_value)
                 break
             if args.eval_only:
                 break
     except KeyboardInterrupt:
         logger.warning("interrupted, saving interrupt checkpoint")
-        save_checkpoint(run_dir / "checkpoints" / "interrupt.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg)
+        save_checkpoint(ckpt_dir / "interrupt.pt", model, optimizer, scheduler, scaler, epoch, global_step, best_metric, cfg,
+                        extra={'partial_epoch': True})
         raise
     finally:
         summary = {
@@ -611,8 +626,8 @@ def main() -> int:
             "global_step": global_step,
             "best_metric": best_metric,
             "best_metric_name": monitor,
-            "last_checkpoint": str(run_dir / "checkpoints" / "last.pt"),
-            "best_checkpoint": str(run_dir / "checkpoints" / "best.pt"),
+            "last_checkpoint": str(ckpt_dir / "last.pt"),
+            "best_checkpoint": str(ckpt_dir / "best.pt"),
             "end_time": datetime.now().isoformat(timespec="seconds"),
         }
         metrics_logger.write_summary(summary)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import torch
 
@@ -37,9 +38,41 @@ def configured_checkpoint_epochs(ckpt_cfg: dict | None) -> set[int]:
     return out
 
 
-def atomic_torch_save(obj: dict, path: str | Path) -> None:
+def checkpoint_directory(run_dir: str | Path, config: dict | None = None) -> Path:
+    configured = (config or {}).get('checkpoint', {}).get('dir')
+    return Path(configured) if configured else Path(run_dir) / 'checkpoints'
+
+
+def should_save_last(config: dict, epoch: int, epochs: int, *, stopping: bool = False) -> bool:
+    ckpt = config.get('checkpoint', {})
+    interval = int(ckpt.get('save_last_every_n_epochs', 1))
+    if interval < 1:
+        raise ValueError('checkpoint.save_last_every_n_epochs must be positive')
+    return bool(ckpt.get('save_last', True)) and (
+        epoch == 1 or epoch == epochs or stopping or epoch % interval == 0
+        or epoch in configured_checkpoint_epochs(ckpt))
+
+
+def tensor_payload_bytes(value) -> int:
+    if isinstance(value, torch.Tensor):
+        return value.untyped_storage().nbytes()
+    if isinstance(value, dict):
+        return sum(tensor_payload_bytes(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return sum(tensor_payload_bytes(item) for item in value)
+    return 0
+
+
+def atomic_torch_save(obj: dict, path: str | Path, min_free_gb: float = 0) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    if min_free_gb > 0:
+        # Keep the previous file until the temporary checkpoint is fully written.
+        required = int(tensor_payload_bytes(obj) * 1.1) + 32 * 1024**2 + int(min_free_gb * 1024**3)
+        free = shutil.disk_usage(path.parent).free
+        if free < required:
+            raise OSError(f'Insufficient checkpoint space at {path.parent}: free={free/1024**3:.2f} GiB, '
+                          f'required~{required/1024**3:.2f} GiB including reserve. Previous checkpoint kept.')
     tmp = path.with_suffix(path.suffix + ".tmp")
     try:
         torch.save(obj, tmp)
@@ -79,7 +112,7 @@ def save_checkpoint(
     }
     if extra:
         payload.update(extra)
-    atomic_torch_save(payload, path)
+    atomic_torch_save(payload, path, min_free_gb=float(ckpt_cfg.get('min_free_gb', 0)))
 
 
 def load_checkpoint(path: str | Path, model, optimizer=None, scheduler=None, scaler=None, map_location="cpu") -> dict:
@@ -87,6 +120,9 @@ def load_checkpoint(path: str | Path, model, optimizer=None, scheduler=None, sca
         ckpt = torch.load(path, map_location=map_location, weights_only=False)
     except TypeError:
         ckpt = torch.load(path, map_location=map_location)
+    if ckpt.get('partial_epoch') and optimizer is not None:
+        raise ValueError('interrupt.pt contains a partial epoch, not an exact resume boundary. '
+                         'Resume from last.pt; interrupted batch position is not recoverable.')
     model.load_state_dict(ckpt["model_state_dict"])
     if optimizer is not None and ckpt.get("optimizer_state_dict") is not None:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
@@ -98,6 +134,6 @@ def load_checkpoint(path: str | Path, model, optimizer=None, scheduler=None, sca
     return ckpt
 
 
-def find_last_checkpoint(run_dir: str | Path) -> Path | None:
-    path = Path(run_dir) / "checkpoints" / "last.pt"
+def find_last_checkpoint(run_dir: str | Path, config: dict | None = None) -> Path | None:
+    path = checkpoint_directory(run_dir, config) / "last.pt"
     return path if path.exists() else None

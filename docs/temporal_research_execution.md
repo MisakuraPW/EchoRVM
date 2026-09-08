@@ -32,13 +32,19 @@
 官方依据：资料/EchoCardMAE-main/EchoCardMAE-main/pretrain.py、model/echocardmae_vit.py、model/utils.py。
 VideoMAE target 依据：[官方 engine_for_pretraining.py](https://github.com/MCG-NJU/VideoMAE/blob/main/engine_for_pretraining.py)。
 
-## 3. RGB 缓存必须核对
+## 3. RGB 输入与可选缓存
 
 旧 tools/cache_echonet_npy.py 默认生成灰度 [T,H,W]。新基线需要 [T,H,W,3] RGB，不能只复制灰度通道后声称完全复现官方输入。
 
-新入口的 --prepare_rgb_cache 会从原始 AVI 生成独立的 EchoNet-Dynamic-rgb 缓存，使用现有缓存工具的 --rgb，不覆盖旧灰度缓存。已存在的文件会跳过。读取时会检查三通道形状；旧灰度缓存会报错，而不是悄悄降级。
+2026-09-09 更新：按用户最新选择，默认复用已有的 /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb，不重复缓存。只有显式指定 --prepare_rgb_cache 才调用缓存工具；已有缓存不会被自动删除。需要省磁盘时可显式 --data_root 指向原始 AVI 根目录，在线解码仍产生相同RGB输入。
 
-默认原始位置 /root/autodl-fs/datasets/EchoNet-Dynamic；可用 --source_root 显式修改。如果已经有可靠 RGB 缓存，直接 --data_root 指向它，无需重新转码。
+缓存生成工具的默认原始位置为 /root/autodl-fs/datasets/EchoNet-Dynamic，可用 --source_root 修改。实际训练来源用 --data_root 选择；默认指向上述已存在RGB缓存。
+
+灰度NPY在技术上可以在线复制成三通道，不需大缓存、不需反复AVI解码，也不必然更慢。但这不是恢复原始RGB；严格复现协议目前不接受灰度替代。这个校验是为了固定实验输入，不代表MAE本身只能使用RGB，也不意味着RGB必然性能更好。若另立灰度协议，应所有对照统一转换，而非只改某个模型。
+
+原始目录必须含 FileList.csv、VolumeTracings.csv、Videos/。如果原始 AVI 已在本地数据盘，--data_root 指向该根目录可以减少网络读取。不要指向旧灰度 NPY 根目录冒充 RGB 输入；同目录同时有 NPY 和 AVI 时现有查找逻辑优先 NPY。
+
+在线解码节省磁盘，但增加 CPU 解码和可能的网络 I/O，实际吞吐需查看 data_time、step_time。想减少 I/O 可仅复制压缩的原始 AVI 和 CSV 到本地，不必解压为 NPY；先检查空间，不自动额外复制。
 
 RGB 缓存的通道顺序约定为 RGB。来自其他工具的 BGR NPY 必须先确认通道顺序；仅凭数组 shape 无法检测顺序。
 
@@ -150,16 +156,16 @@ bash scripts/run_temporal_research.sh --dry_run
 
 ```bash
 bash scripts/run_temporal_research.sh \
-  --run_tag temporal_v1_smoke --smoke --prepare_rgb_cache
+  --run_tag temporal_v1_smoke --smoke
 ```
 
-检查 RGB 缓存来源若不在默认位置，追加 --source_root 你的原始EchoNet根目录。
+已有RGB缓存不在默认位置时，用 --data_root 指定它。想在线读AVI，也用该参数指向含Videos和CSV的原始根目录。
 
 正式主实验：修正后的三条视频基线＋六条时域研究模型，共9组，每组400轮及全阶段冻结评估：
 
 ```bash
 bash scripts/run_temporal_research.sh \
-  --run_tag temporal_v1_s42 --prepare_rgb_cache
+  --run_tag temporal_v1_s42
 ```
 
 缓存已经生成，之后可以显式指定，不再调用缓存工具：
@@ -170,7 +176,7 @@ bash scripts/run_temporal_research.sh \
   --data_root /root/autodl-tmp/datasets/EchoNet-Dynamic-rgb
 ```
 
-这条命令也是续跑命令。已完成预训练/评估的阶段跳过；未完成训练从 last.pt 恢复。中断发生在 epoch 中途时，默认从上一个完整 epoch 的 last.pt 重跑当前 epoch，不把部分 epoch 标为完成。
+同样的原始命令也是续跑命令，必须保留首次运行的 data_root 和训练参数。已完成阶段跳过，未完成训练从最近的 last.pt 恢复；默认每10轮保存，因此意外关机可能需要重算最多约10轮，而不是逐batch精确恢复。不要把 partial-epoch 的 interrupt.pt 当成完整epoch续训点。
 
 完整37组可直接加 --suite full；也可以主实验结束后用相同 run_tag 加 --suite full，已完成的9组不重跑。这个矩阵预算明显更大，不建议未经冒烟就启动全部37组。
 
@@ -188,7 +194,7 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
 bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 --summarize_only
 ```
 
-同一run_tag下改变已有实验的训练超参数会报错，防止把两套协议接在一起。改batch/epochs/seed请用新run_tag；不能把旧baseline400标签填进来接续错误实验。
+同一run_tag下改变已有实验的训练超参数会报错，防止把两套协议接在一起。改batch/epochs/seed/data_root请用新run_tag；不能把旧baseline400标签填进来接续错误实验。单纯改变权重目录、last保存频率和磁盘保留策略不改变训练协议。
 
 ## 9. 可选全量微调锚点
 
@@ -213,17 +219,21 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
 - 时域研究 microbatch8，累积4，有效batch32；可用 --batch_size / --grad_accum_steps 修改。所有时域对照同时修改。
 - --baseline_batch_size 单独控制视频基线；改小后要记录它对InfoNCE的影响。
 - AMP、SDPA注意力、编码器/MAE解码器activation checkpointing开启。CPU数据worker默认8、prefetch4。
-- 数据位于autodl-tmp本地盘；workers优先按data_time调，不以瞬时GPU利用率为唯一目标。
+- 默认复用autodl-tmp上的RGB缓存；在线AVI可选但不默认。workers优先按data_time调，不以瞬时GPU利用率为唯一目标。
 - frame_rvm64每视频有64次串行状态更新，不一定比16×4结构快。增加batch也不保证消除kernel调度开销。
 - OOM先将时域batch8改4、累积4改8，在新run_tag重跑同组对照；不自动缩短frames或改变mask比例。
 - 本地没有CUDA训练验证，不能保证上述batch在每个GPU/软件环境都适合。服务器冒烟就是正式前的显存与依赖检查。
-- last.pt保留完整续训状态；epoch_0000/0050/.../0400保存不带优化器的评价快照；不再每5轮保存大体积优化器快照。
+- last.pt在第1轮、每10轮、评价快照轮及训练结束时覆盖保存完整续训状态。--save_last_every 可修改频率；只有一份last，不累计last历史。
+- epoch_0000/0050/.../0400为不带优化器的评价快照；仍先训练完400轮，再逐阶段冻结评估，不改变评价协议。每个阶段评估成功后删除对应中间快照，最终保留epoch_0400.pt。
+- 该模型全部请求的评估及可选全量微调完成后，删除其last.pt/interrupt.pt。尚未完成、评估失败或--no_audit时不会删除续训文件。可选全量微调完成后保留轻量best.pt。
+- --keep_stage_checkpoints 保留所有阶段快照；--keep_completed_resume 保留已完成实验的完整续训文件。默认省空间策略下，中间权重删除后不能再对它们新增评价；已有指标/图/日志不删。需要未来重评时从一开始使用保留开关。
+- 保存前估算临时checkpoint所需空间，并额外保留2GiB（--min_free_gb）。不足时明确停止并保留原last，而非自动删除其他数据。这不能代替磁盘容量管理，也不能保证其他进程不会同时写满磁盘。
 - 默认不保存best MAE权重，不用val_loss挑研究阶段。训练loss图每5轮刷新，原始epoch日志每轮保存。
 - 保存invocations.jsonl中的Git版本、PyTorch、GPU及命令；input_contract.json记录实际RGB输入；requested_config.yaml/config.yaml记录实参。
 
 ## 11. 下载哪些结果
 
-默认根目录 /root/autodl-tmp/outputs_temporal/<run_tag>。
+默认本轮根目录 /root/autodl-tmp/outputs_temporal/<run_tag>，其下顶层分 result/ 和 ckpt/。下述日志、汇总、audit、图像均位于 result/；权重按相同实验名独立放在 ckpt/，包括可选全量微调权重。详细目录和旧结果迁移见 [保存与空间说明](temporal_storage_and_resume.md)。
 
 - comparison.csv/md、representation_trajectory.png：阶段曲线与汇总。
 - paired_comparisons.csv：等条件记忆/无记忆、匹配基线的EF配对比较。
@@ -231,9 +241,9 @@ bash scripts/run_temporal_research.sh --run_tag temporal_v1_s42 \
 - 每组logs、plots、initialization.json、config文件。
 - 每个audit/epoch_xxxx下metrics.json、ef_predictions.csv、seg_predictions.csv、temporal_distances.csv、temporal_diagnostics.png。
 - trajectory_*.npz保存原始诊断特征和状态，确需深入轨迹分析时再下载。
-- full_finetune保存可选全量微调锚点的原有日志、曲线和权重。
+- result/<模型>/full_finetune保存可选全量微调的日志、曲线；对应权重在ckpt/<模型>/full_finetune/<任务>/。
 
-连跑结束自动生成analysis.zip：包括日志/表格/图/配置，不含checkpoint权重，也不含较大的诊断特征NPZ。通常下载这个zip即可。
+连跑结束自动生成result/analysis.zip：包括日志/表格/图/配置，不含checkpoint权重，也不含较大的诊断特征NPZ。通常下载这个zip即可；直接下载整个result/也不会带上权重。
 
 ## 12. 验证命令与限制
 

@@ -230,7 +230,7 @@ class ProbeSegDataset(EchoNetSegmentationDataset):
         path = find_echonet_video(self.root, sample['stem'])
         raw = np.load(path, mmap_mode='r') if path.suffix == '.npy' else read_video(path)
         if self.channels == 3 and (raw.ndim != 4 or raw.shape[-1] != 3):
-            raise ValueError('Frozen probes require the same RGB cache as pretraining.')
+            raise ValueError('Frozen probes require RGB inputs: use original AVI or RGB NPY, not grayscale NPY.')
         if path.suffix not in {'.npy','.npz'} and raw.ndim == 4:
             raw = raw[..., ::-1].copy()
         center = sample['frame']

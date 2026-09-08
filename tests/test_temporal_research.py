@@ -45,6 +45,31 @@ class TemporalTests(unittest.TestCase):
     def setUp(self):
         torch.manual_seed(42)
 
+    def test_raw_avi_matches_rgb_cache(self):
+        import cv2
+        from tools.cache_echonet_npy import read_video as cache_decode
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            raw_root, cache_root = root/'raw', root/'rgb'
+            (raw_root/'Videos').mkdir(parents=True)
+            (cache_root/'npy').mkdir(parents=True)
+            for directory in (raw_root, cache_root):
+                (directory/'FileList.csv').write_text('FileName,EF,Split\na,55,VAL\n')
+            path = raw_root/'Videos/a.avi'
+            writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*'MJPG'), 30, (16,16))
+            self.assertTrue(writer.isOpened())
+            for i in range(6):
+                frame = np.zeros((16,16,3),dtype=np.uint8)
+                frame[...,0], frame[...,1], frame[...,2] = 20+i,80,180
+                writer.write(frame)
+            writer.release()
+            np.save(cache_root/'npy/a.npy',cache_decode(path,grayscale=False))
+            a = TemporalEchoDataset(raw_root,'val',4,img_size=16,channels=3)[0]
+            b = TemporalEchoDataset(cache_root,'val',4,img_size=16,channels=3)[0]
+            torch.testing.assert_close(a['video'],b['video'],rtol=0,atol=0)
+            torch.testing.assert_close(a['frame_indices'],b['frame_indices'])
+            self.assertGreater(float(a['video'][:,0].mean()),float(a['video'][:,2].mean()))
+
     def test_modes_backward_amp_and_reset(self):
         for mode in ('none', 'global', 'spatial', 'dual'):
             with self.subTest(mode=mode):
@@ -285,20 +310,23 @@ class TemporalTests(unittest.TestCase):
                        early_stopping=dict(enabled=False),logging=dict(use_tqdm=False,use_tensorboard=False))
             path = root/'config.yaml'
             path.write_text(yaml.safe_dump(cfg))
-            run = root/'run'
-            command = [sys.executable,'trainers/train_rmae.py','--config',str(path),'--output_dir',str(run)]
+            run = root/'result/run'
+            ckpt = root/'ckpt/run'
+            command = [sys.executable,'trainers/train_rmae.py','--config',str(path),'--output_dir',str(run),
+                       '--checkpoint_dir',str(ckpt),'--save_last_every','10']
             subprocess.run(command,cwd=project,env=env,check=True,capture_output=True,text=True)
             self.assertTrue((run/'plots/loss_latest.png').exists())
-            self.assertTrue((run/'checkpoints/epoch_0000.pt').exists())
-            first = torch.load(run/'checkpoints/last.pt',weights_only=False)
+            self.assertFalse((run/'checkpoints').exists())
+            self.assertTrue((ckpt/'epoch_0000.pt').exists())
+            first = torch.load(ckpt/'last.pt',weights_only=False)
             subprocess.run(command+['--epochs','2','--checkpoint_epochs','1 2'],cwd=project,env=env,
                            check=True,capture_output=True,text=True)
-            second = torch.load(run/'checkpoints/last.pt',weights_only=False)
+            second = torch.load(ckpt/'last.pt',weights_only=False)
             self.assertEqual(second['epoch'],2)
             self.assertEqual(second['global_step'],first['global_step']+2)
             audit = root/'audit'
             command = [sys.executable,'tools/evaluate_temporal_mae.py','--checkpoint',
-                       str(run/'checkpoints/epoch_0002.pt'),'--data_root',str(root),
+                       str(ckpt/'epoch_0002.pt'),'--data_root',str(root),
                        '--output_dir',str(audit),'--smoke','--audit_frames','16','--batch_size','2']
             result = subprocess.run(command,cwd=project,env=env,capture_output=True,text=True)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
@@ -308,6 +336,24 @@ class TemporalTests(unittest.TestCase):
             self.assertIn('state_only_ef',metrics)
             self.assertIn('state_only_seg_dice',metrics['segmentation'])
             self.assertTrue((audit/'ef_predictions.csv').exists())
+            fine_cfg = dict(experiment=dict(seed=42),model=dict(img_size=112,frames=8),
+                            data=dict(data_root=str(root),num_workers=0),
+                            train=dict(epochs=1,batch_size=2,max_steps=2,mixed_precision=False),
+                            optimizer=dict(name='adamw',lr=.001),scheduler=dict(name='none'),
+                            checkpoint=dict(auto_resume=True,save_every_n_epochs=0,best_weights_only=True),
+                            early_stopping=dict(enabled=False),
+                            logging=dict(use_tqdm=False,use_tensorboard=False))
+            fine_path = root/'fine.yaml'
+            fine_path.write_text(yaml.safe_dump(fine_cfg))
+            fine_result, fine_ckpt = root/'result/fine',root/'ckpt/fine'
+            command = [sys.executable,'trainers/train_finetune.py','--task','echonet_ef','--config',str(fine_path),
+                       '--pretrained',str(ckpt/'epoch_0002.pt'),'--output_dir',str(fine_result),
+                       '--checkpoint_dir',str(fine_ckpt),'--save_last_every','10']
+            fine = subprocess.run(command,cwd=project,env=env,capture_output=True,text=True)
+            self.assertEqual(fine.returncode,0,fine.stdout+fine.stderr)
+            self.assertFalse(list((root/'result').rglob('*.pt')))
+            self.assertTrue((fine_ckpt/'last.pt').is_file())
+            self.assertIsNone(torch.load(fine_ckpt/'best.pt',weights_only=False)['optimizer_state_dict'])
             report_root = root/'reports'
             for name in ('clip_mae_pool64','hier_global'):
                 shutil.copytree(audit,report_root/name/'audit/epoch_0002')
