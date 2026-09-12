@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, RandomSampler
 from tqdm import tqdm
 
 from models import build_echo_rmae, build_echo_single_frame_mae, build_echo_videomae, build_echocardmae_video
@@ -87,6 +87,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init_checkpoint", default=None)
     parser.add_argument("--checkpoint_epochs", default=None, help="Fixed epoch checkpoints, e.g. '50 100 150 200'.")
     parser.add_argument("--save_every_n_epochs", type=int, default=None)
+    parser.add_argument("--autotune", action="store_true", help="Isolated CUDA throughput calibration; preserves effective batch.")
     return parser.parse_args()
 
 
@@ -183,6 +184,14 @@ def build_loader(cfg: dict[str, Any], split: str, max_steps: int | None) -> Data
     if workers > 0:
         kwargs["persistent_workers"] = bool(data_cfg.get("persistent_workers", True))
         kwargs["prefetch_factor"] = int(data_cfg.get("prefetch_factor", 4))
+    if split == 'train' and 'epoch_sample_batch' in train_cfg:
+        from utils.autotune import SampleBudgetBatchSampler
+        original = int(train_cfg['epoch_sample_batch'])
+        count = len(dataset) // original * original if kwargs['drop_last'] else len(dataset)
+        sampler = RandomSampler(dataset, generator=kwargs['generator'])
+        for key in ('batch_size', 'shuffle', 'drop_last'):
+            kwargs.pop(key)
+        kwargs['batch_sampler'] = SampleBudgetBatchSampler(sampler, count, batch_size)
     return DataLoader(dataset, **kwargs)
 
 
@@ -293,7 +302,15 @@ def run_epoch(
                     out = model(batch["video"])
                 window_start = ((step - 1) // grad_accum) * grad_accum
                 divisor = min(grad_accum, expected_steps - window_start)
-                loss = out['loss'] / divisor
+                if train and 'epoch_sample_batch' in train_cfg:
+                    effective = int(train_cfg['batch_size']) * grad_accum
+                    count = loader.batch_sampler.sample_count
+                    if max_steps is not None:
+                        count = min(count, expected_steps * int(train_cfg['batch_size']))
+                    window_samples = min(effective, count - window_start * int(train_cfg['batch_size']))
+                    loss = out['loss'] * batch['video'].shape[0] / window_samples
+                else:
+                    loss = out['loss'] / divisor
         if bool(train_cfg.get("stop_on_nan", True)) and not torch.isfinite(out["loss"]).all():
             raise FloatingPointError(f"Non-finite loss at epoch={epoch} step={step}: {float(out['loss'].detach().cpu())}")
         fwd_time = now() - start
@@ -376,6 +393,22 @@ def validate_baseline_config(model_cfg: dict[str, Any]) -> None:
             raise ValueError("Official EchoCardMAE requires stride=4 and two_views=true")
 
 
+def build_training_model(model_cfg, device):
+    validate_baseline_config(model_cfg)
+    name = str(model_cfg.get('name', 'echo_rmae')).lower()
+    if name == 'temporal_mae':
+        model = TemporalMAE(**model_cfg)
+    elif name in {'echo_single_frame_mae', 'single_frame_mae', 'videomae_single_frame'}:
+        model = build_echo_single_frame_mae(model_cfg)
+    elif name in {'echocardmae_video', 'echo_card_mae_video'}:
+        model = build_echocardmae_video(model_cfg)
+    elif name in {'echo_videomae', 'videomae', 'video_mae'}:
+        model = build_echo_videomae(model_cfg)
+    else:
+        model = build_echo_rmae(model_cfg)
+    return model.to(device)
+
+
 def main() -> int:
     args = parse_args()
     cfg = load_config(args.config)
@@ -386,6 +419,10 @@ def main() -> int:
     cli_overrides = apply_cli_overrides(cfg, args)
     seed_everything(int(cfg.get("experiment", {}).get("seed", 42)))
     run_dir = make_run_dir(cfg, args.output_dir)
+    if (args.autotune or (run_dir / 'autotune' / 'runtime.json').exists()) and not args.eval_only:
+        from tools.tune_rmae_runtime import calibrate
+        cfg = calibrate(cfg, run_dir)
+        seed_everything(int(cfg.get('experiment', {}).get('seed', 42)))
     ckpt_dir = checkpoint_directory(run_dir, cfg)
     shutil.copy2(args.config, run_dir / "config_source.yaml")
     save_config(cfg, run_dir / "config.yaml")
@@ -393,6 +430,10 @@ def main() -> int:
     logger.info("run_dir=%s", run_dir)
     logger.info("checkpoint_dir=%s", ckpt_dir)
     logger.info("command=%s", " ".join(sys.argv))
+    logger.info('runtime micro_batch=%s accumulation=%s effective_batch=%s workers=%s checkpointing=%s',
+                cfg['train']['batch_size'], cfg['train'].get('grad_accum_steps', 1),
+                int(cfg['train']['batch_size']) * int(cfg['train'].get('grad_accum_steps', 1)),
+                cfg['data'].get('num_workers', 0), cfg['model'].get('gradient_checkpointing', False))
     if cli_overrides:
         logger.info("cli_overrides=%s", ", ".join(cli_overrides))
     augment_cfg = cfg.get("augment", {})
@@ -431,16 +472,7 @@ def main() -> int:
         model_cfg.get("auto_roi", False),
         model_cfg.get("median_blur_kernel", 1),
     )
-    if model_name == 'temporal_mae':
-        model = TemporalMAE(**model_cfg).to(device)
-    elif model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
-        model = build_echo_single_frame_mae(model_cfg).to(device)
-    elif model_name in {"echocardmae_video", "echo_card_mae_video"}:
-        model = build_echocardmae_video(model_cfg).to(device)
-    elif model_name in {"echo_videomae", "videomae", "video_mae"}:
-        model = build_echo_videomae(model_cfg).to(device)
-    else:
-        model = build_echo_rmae(model_cfg).to(device)
+    model = build_training_model(model_cfg, device)
     init_checkpoint = cfg.get("model", {}).get("init_checkpoint")
     if init_checkpoint and not args.resume:
         init_report = load_videomae_init(model, init_checkpoint, map_location="cpu")

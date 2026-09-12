@@ -86,10 +86,15 @@ def run_command(command, label, root, timings):
     print(f'\n========== {label} ==========\n' + subprocess.list2cmdline(command), flush=True)
     begin = time.perf_counter()
     status = 'failed'
+    stage_file = root / 'current_stage.json'
+    stage_file.write_text(json.dumps(dict(stage=label, status='running', command=command,
+                                         started=datetime.now().isoformat()), indent=2), encoding='utf-8')
     try:
         subprocess.run(command, cwd=ROOT, check=True)
         status = 'completed'
     finally:
+        stage_file.write_text(json.dumps(dict(stage=label, status=status,
+                                             ended=datetime.now().isoformat()), indent=2), encoding='utf-8')
         timings.append(dict(stage=label, seconds=time.perf_counter()-begin, status=status,
                             ended=datetime.now().isoformat()))
         write_csv(root / 'stage_times.csv', timings)
@@ -234,6 +239,8 @@ def main():
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--prefetch_factor', type=int, default=4)
     parser.add_argument('--audit_batch_size', type=int, default=4)
+    parser.add_argument('--autotune', action='store_true',
+                        help='Calibrate each pretraining model in isolated processes; preserve effective batch.')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--start_experiment', type=int, default=1)
     parser.add_argument('--only', nargs='+', help='Exact experiment names from --dry_run.')
@@ -282,10 +289,14 @@ def main():
         return
     configs = [(name, make_config(kind, name, changes, args)) for name, kind, changes in entries]
     for i, (name, cfg) in enumerate(configs, 1):
+        if i < args.start_experiment or (args.only and name not in args.only):
+            continue
         m = cfg['model']
         print(f'{i:02d} {name:34s} T={m["frames"]:3d} local={m.get("local_frames", m["frames"]):2d} '
               f'memory={m.get("memory_mode", "none"):7s} epochs={args.epochs}')
-    print(f'Experiments={len(entries)}; result={root}; ckpt={ckpt_root}; baseline old results will NOT be reused.')
+    selected_count = sum(i >= args.start_experiment and (not args.only or name in args.only)
+                         for i, (name, _) in enumerate(configs, 1))
+    print(f'Selected experiments={selected_count}/{len(entries)}; result={root}; ckpt={ckpt_root}')
     print(f'Data={args.data_root}; prepare_rgb_cache={args.prepare_rgb_cache}; '
           f'input_protocol={args.input_protocol}; last_every={args.save_last_every}; keep_stages={args.keep_stage_checkpoints}')
     if args.dry_run:
@@ -354,6 +365,8 @@ def main():
         if not complete.exists():
             cmd = [sys.executable, 'trainers/train_rmae.py', '--config', str(config_path),
                    '--output_dir', str(destination)]
+            if args.autotune:
+                cmd.append('--autotune')
             run_command(cmd, name + '/pretrain', root, timings)
             final = checkpoint_dir / f'epoch_{args.epochs:04d}.pt'
             if not final.exists():
