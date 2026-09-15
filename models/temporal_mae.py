@@ -9,6 +9,7 @@ from torch.nn import functional as F
 from .rvm_core import RVMCore
 from .video_mae import EchoVideoMAE, tubelet_patchify
 from .vit_blocks import CrossBlock
+from .frequency import FrequencyMemoryGates, band_descriptor, multiband_error
 
 
 def temporal_mask(batch, grid, ratio, strategy, device, clip_index=0, spatial_order=None):
@@ -72,6 +73,17 @@ class TemporalMAE(EchoVideoMAE):
             self.feature_fusion = CrossBlock(self.embed_dim, int(cfg.get('num_heads', 6)))
         if self.memory_mode == 'dual':
             self.short_gate = nn.Parameter(torch.zeros(()))
+        self.frequency_conditioned = bool(cfg.get('frequency_conditioned', False))
+        self.frequency_loss_weight = float(cfg.get('frequency_loss_weight', 0.))
+        if self.frequency_loss_weight < 0:
+            raise ValueError('frequency_loss_weight must be nonnegative')
+        if self.frequency_conditioned or self.frequency_loss_weight:
+            if self.patch_size % 4 or self.norm_pix_loss:
+                raise ValueError('Two-level local Haar requires patch_size divisible by 4 and norm_pix_loss=false')
+        if self.frequency_conditioned:
+            if self.memory_mode == 'none':
+                raise ValueError('Frequency-conditioned memory requires an active memory core')
+            self.frequency_gates = FrequencyMemoryGates(self.embed_dim)
 
     def _pool(self, encoded, mask, valid):
         b, _, dim = encoded.shape
@@ -115,6 +127,8 @@ class TemporalMAE(EchoVideoMAE):
         state, short = None, None
         features, states, predictions, targets, used_masks = [], [], [], [], []
         loss_sum, weight_sum = video.new_zeros(()), video.new_zeros(())
+        frequency_sum = video.new_zeros(())
+        read_gates, write_gates = [], []
         gt, gh, gw = self.token_grid
         spatial_order = torch.rand(b, gh * gw, device=video.device).argsort(-1) if reconstruct else None
         for i, clip in enumerate(video.split(self.local_frames, dim=1)):
@@ -129,11 +143,23 @@ class TemporalMAE(EchoVideoMAE):
                     b, self.token_grid, self.mask_ratio, self.research_mask,
                     video.device, i, spatial_order)
             encoded, _ = self.encode_video(clip, mask)
+            descriptor = None
+            if self.frequency_conditioned:
+                with torch.no_grad():
+                    raw_patches = tubelet_patchify(clip, self.tubelet_size, self.patch_size)
+                    # Select first: hidden pixels never enter the conditioning path.
+                    selected = raw_patches if mask is None else raw_patches[~mask].reshape(b, -1, raw_patches.shape[-1])
+                    descriptor = band_descriptor(selected, self.tubelet_size, self.patch_size, self.in_chans)
             previous = state
             if previous is not None and short is not None:
                 previous = previous + self.short_gate.sigmoid() * short
             if previous is not None:
-                encoded = self.feature_fusion(encoded, previous.to(encoded))
+                fused = self.feature_fusion(encoded, previous.to(encoded))
+                if self.frequency_conditioned:
+                    encoded, gate = self.frequency_gates.read(encoded, fused, descriptor, previous)
+                    read_gates.append(gate)
+                else:
+                    encoded = fused
             pooled = self._pool(encoded, mask, valid)
             if reconstruct:
                 decoded = self.decoder_embed(encoded)
@@ -150,6 +176,11 @@ class TemporalMAE(EchoVideoMAE):
                         target.var(-1, keepdim=True, unbiased=False) + 1e-6).sqrt()
                 weights = (mask & valid).float()
                 loss_sum = loss_sum + ((pred.float() - target.float()).square().mean(-1) * weights).sum()
+                if self.frequency_loss_weight:
+                    selected_mask = mask & valid
+                    error = multiband_error(pred[selected_mask], target[selected_mask].detach(),
+                                            self.tubelet_size, self.patch_size, self.in_chans)
+                    frequency_sum = frequency_sum + error.sum()
                 weight_sum = weight_sum + weights.sum()
                 predictions.append(pred)
                 targets.append(target)
@@ -157,6 +188,10 @@ class TemporalMAE(EchoVideoMAE):
             if self.memory_mode != 'none':
                 _, proposed = self.memory(pooled, state)
                 old = torch.zeros_like(proposed) if state is None else state
+                if self.frequency_conditioned:
+                    pooled_descriptor = self._pool(descriptor, mask, valid)
+                    proposed, gate = self.frequency_gates.write(old, proposed, pooled_descriptor)
+                    write_gates.append(gate)
                 active = valid.any(-1)[:, None, None]
                 state = torch.where(active, proposed, old)
                 states.append(state.mean(1))
@@ -171,9 +206,17 @@ class TemporalMAE(EchoVideoMAE):
         if reconstruct:
             if not bool(weight_sum > 0):
                 raise ValueError('No valid masked tubelets: video is too short for this configuration.')
-            loss = loss_sum / weight_sum
-            result.update(loss=loss, loss_recon=loss.detach(), pred=torch.cat(predictions, 1),
+            pixel_loss = loss_sum / weight_sum
+            frequency_loss = frequency_sum / weight_sum
+            loss = pixel_loss + self.frequency_loss_weight * frequency_loss
+            result.update(loss=loss, loss_recon=pixel_loss.detach(),
+                          loss_frequency=frequency_loss.detach(),
+                          loss_frequency_weighted=(self.frequency_loss_weight * frequency_loss).detach(),
+                          pred=torch.cat(predictions, 1),
                           target=torch.cat(targets, 1), mask=torch.cat(used_masks, 1))
+            if write_gates:
+                result['frequency_write_gate'] = torch.stack(write_gates).mean()
+                result['frequency_read_gate'] = torch.stack(read_gates).mean() if read_gates else loss.new_zeros(())
         else:
             result['features'] = torch.cat(features, 1)
         return result

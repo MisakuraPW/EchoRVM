@@ -265,7 +265,9 @@ def run_epoch(
     if loader.generator is not None:
         loader.generator.manual_seed(int(cfg.get('experiment', {}).get('seed', 42)) + data_epoch)
     loss_meter = AverageMeter()
-    component_meters = {"loss_recon": AverageMeter(), "loss_align": AverageMeter()}
+    component_meters = {key: AverageMeter() for key in (
+        'loss_recon', 'loss_align', 'loss_frequency', 'loss_frequency_weighted',
+        'frequency_read_gate', 'frequency_write_gate')}
     data_meter = AverageMeter()
     step_meter = AverageMeter()
     fwd_meter = AverageMeter()
@@ -368,6 +370,10 @@ def run_epoch(
         metrics["step_time"],
     )
     metrics.update({key: meter.avg for key, meter in component_meters.items()})
+    if cfg.get('model', {}).get('frequency_conditioned'):
+        logger.info('frequency pixel=%.6f band=%.6f weighted=%.6f read_gate=%.4f write_gate=%.4f',
+                    metrics['loss_recon'], metrics['loss_frequency'], metrics['loss_frequency_weighted'],
+                    metrics['frequency_read_gate'], metrics['frequency_write_gate'])
     if validation_rng is not None:
         set_rng_state(validation_rng)
     return metrics, global_step
@@ -593,7 +599,8 @@ def main() -> int:
                 "step_time": train_metrics["step_time"],
                 "time": datetime.now().isoformat(timespec="seconds"),
             }
-            for key in ('loss_recon', 'loss_align'):
+            for key in ('loss_recon', 'loss_align', 'loss_frequency', 'loss_frequency_weighted',
+                        'frequency_read_gate', 'frequency_write_gate'):
                 row['train_' + key] = train_metrics[key]
                 row['val_' + key] = val_metrics[key] if val_metrics else None
             metrics_logger.write_jsonl('train_metrics.jsonl', row)
@@ -607,6 +614,9 @@ def main() -> int:
                 tb_writer.add_scalar("LR", train_metrics["lr"], epoch)
                 tb_writer.add_scalar("Runtime/data_time", train_metrics["data_time"], epoch)
                 tb_writer.add_scalar("Runtime/step_time", train_metrics["step_time"], epoch)
+                for key in ('loss_recon', 'loss_frequency', 'loss_frequency_weighted',
+                            'frequency_read_gate', 'frequency_write_gate'):
+                    tb_writer.add_scalar('Components/train_' + key, train_metrics[key], epoch)
             metric_value = val_metrics["loss"] if val_metrics else train_metrics["loss"]
             improved = False
             if best_metric is None:

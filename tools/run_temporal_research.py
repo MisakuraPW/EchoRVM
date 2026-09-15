@@ -23,6 +23,11 @@ from utils.research_storage import (check_protocol, prepare_layout, prune_audite
 
 
 def experiment_matrix(suite):
+    if suite == 'tsf':
+        shared = dict(local_frames=16, clip_count=4, memory_mode='spatial')
+        return [('tsf_spatial_control', 'temporal', dict(shared)),
+                ('tsf_frequency_memory', 'temporal', dict(shared, frequency_conditioned=True,
+                                                        frequency_loss_weight=0.1))]
     entries = [
         ('echocardmae_video_port', 'official', {}),
         ('videomae_matched', 'matched', {}),
@@ -101,6 +106,8 @@ def run_command(command, label, root, timings):
 
 
 def summarize(root):
+    from tools.evaluate_temporal_screen import summarize_quick
+    summarize_quick(root)
     import csv
     rows = []
     for path in sorted(root.glob('*/audit/epoch_*/metrics.json')):
@@ -221,7 +228,9 @@ def paired_report(root,rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--suite', choices=('core', 'full'), default='core')
+    parser.add_argument('--suite', choices=('core', 'full', 'tsf'), default='core')
+    parser.add_argument('--screen_seg_final', action='store_true',
+                        help='One frozen segmentation probe at the final snapshot, not at every audit.')
     parser.add_argument('--run_tag', default=os.environ.get('RUN_TAG', 'temporal_gray_' + datetime.now().strftime('%Y%m%d_%H%M%S')))
     parser.add_argument('--output_root', default='/root/autodl-tmp/outputs_temporal')
     parser.add_argument('--data_root', default=None,
@@ -232,7 +241,9 @@ def main():
     parser.add_argument('--source_root', default='/root/autodl-fs/datasets/EchoNet-Dynamic')
     parser.add_argument('--init_checkpoint', default='ckpt/mae/videomae_vit_s.pth')
     parser.add_argument('--epochs', type=int, default=400)
-    parser.add_argument('--audit_epochs', type=int, nargs='+', default=[0, 50, 100, 150, 200, 250, 300, 350, 400])
+    parser.add_argument('--audit_epochs', type=int, nargs='+', default=None)
+    parser.add_argument('--audit_profile', choices=('full', 'quick'), default='full',
+                        help='Quick runs normal EF/state probes only and preserves stage checkpoints.')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--grad_accum_steps', type=int, default=4)
     parser.add_argument('--baseline_batch_size', type=int, default=32)
@@ -269,6 +280,8 @@ def main():
         parser.error('--prepare_rgb_cache requires --input_protocol rgb. Gray runs reuse existing NPY without caching.')
     if args.prepare_rgb_cache and not args.data_root.endswith('-rgb'):
         args.data_root += '-rgb'
+    if args.audit_epochs is None:
+        args.audit_epochs = [0, 100, 200, 400] if args.audit_profile == 'quick' else list(range(0, 401, 50))
     if args.smoke:
         args.epochs, args.audit_epochs = 1, [0, 1]
         if not args.run_tag.startswith('smoke_'):
@@ -282,7 +295,7 @@ def main():
     run_root = Path(args.output_root) / args.run_tag
     root, ckpt_root = run_root / 'result', run_root / 'ckpt'
     if args.summarize_only:
-        root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full')],
+        root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full') + experiment_matrix('tsf')],
                                          migrate=args.migrate_legacy_layout)
         summarize(root)
         archive_analysis(root)
@@ -298,10 +311,12 @@ def main():
                          for i, (name, _) in enumerate(configs, 1))
     print(f'Selected experiments={selected_count}/{len(entries)}; result={root}; ckpt={ckpt_root}')
     print(f'Data={args.data_root}; prepare_rgb_cache={args.prepare_rgb_cache}; '
-          f'input_protocol={args.input_protocol}; last_every={args.save_last_every}; keep_stages={args.keep_stage_checkpoints}')
+          f'input_protocol={args.input_protocol}; last_every={args.save_last_every}; '
+          f'keep_stages={args.keep_stage_checkpoints or args.audit_profile == "quick"}')
+    print(f'Audit profile={args.audit_profile}; epochs={args.audit_epochs}')
     if args.dry_run:
         return
-    root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full')],
+    root, ckpt_root = prepare_layout(run_root, [n for n, _, _ in experiment_matrix('full') + experiment_matrix('tsf')],
                                      migrate=args.migrate_legacy_layout)
     # Even --only must not append gray results to a run containing RGB experiments.
     for old_config in root.glob('*/requested_config.yaml'):
@@ -310,7 +325,9 @@ def main():
             raise RuntimeError('Input protocol changed: use a new run_tag instead of mixing RGB and gray experiments.')
     if not Path(args.init_checkpoint).is_file():
         raise FileNotFoundError(args.init_checkpoint)
-    if not args.no_audit or args.anchors != 'none':
+    needs_segmentation = ((not args.no_audit and args.audit_profile == 'full')
+                          or args.anchors != 'none' or args.screen_seg_final)
+    if needs_segmentation:
         try:
             import skimage.draw
         except ImportError as exc:
@@ -319,7 +336,7 @@ def main():
         subprocess.run([sys.executable,'tools/cache_echonet_npy.py','--input-root',args.source_root,
                         '--output-root',args.data_root,'--rgb','--num-workers',str(max(1,args.num_workers))],
                        cwd=ROOT,check=True)
-    for filename in ('FileList.csv', 'VolumeTracings.csv'):
+    for filename in (('FileList.csv', 'VolumeTracings.csv') if needs_segmentation else ('FileList.csv',)):
         if not (Path(args.data_root) / filename).is_file():
             raise FileNotFoundError(Path(args.data_root) / filename)
     root.mkdir(parents=True, exist_ok=True)
@@ -374,27 +391,43 @@ def main():
             complete.write_text(digest + '\n')
         if not args.no_audit:
             for epoch in args.audit_epochs:
-                audit = destination / 'audit' / f'epoch_{epoch:04d}'
+                audit = destination / ('quick_audit' if args.audit_profile == 'quick' else 'audit') / f'epoch_{epoch:04d}'
                 if (audit / 'DONE').exists():
                     if not (audit / 'metrics.json').is_file():
                         raise RuntimeError(f'Audit marker without metrics: {audit}')
                     prune_audited_snapshot(checkpoint_dir, destination, epoch, args.epochs,
-                                           keep=args.keep_stage_checkpoints)
+                                           keep=args.keep_stage_checkpoints or args.audit_profile == 'quick')
                     continue
                 checkpoint = checkpoint_dir / f'epoch_{epoch:04d}.pt'
                 if not checkpoint.is_file():
                     raise FileNotFoundError(f'Missing unaudited snapshot: {checkpoint}. '
                                             'Pruned snapshots cannot be re-evaluated; preserve existing audit results.')
-                cmd = [sys.executable, 'tools/evaluate_temporal_mae.py', '--checkpoint', str(checkpoint),
+                evaluator = 'tools/evaluate_temporal_screen.py' if args.audit_profile == 'quick' else 'tools/evaluate_temporal_mae.py'
+                cmd = [sys.executable, evaluator, '--checkpoint', str(checkpoint),
                        '--data_root', args.data_root, '--output_dir', str(audit),
                        '--batch_size', str(args.audit_batch_size), '--num_workers', str(args.num_workers),
                        '--seed', str(args.seed)]
                 if args.smoke:
                     cmd.append('--smoke')
-                run_command(cmd, name + f'/audit{epoch}', root, timings)
+                label = f'/quick_audit{epoch}' if args.audit_profile == 'quick' else f'/audit{epoch}'
+                run_command(cmd, name + label, root, timings)
                 summarize(root)
                 prune_audited_snapshot(checkpoint_dir, destination, epoch, args.epochs,
-                                       keep=args.keep_stage_checkpoints)
+                                       keep=args.keep_stage_checkpoints or args.audit_profile == 'quick')
+        if args.screen_seg_final:
+            seg_output = destination / 'seg_history_v1' / f'epoch_{args.epochs:04d}'
+            if not (seg_output / 'DONE').exists():
+                cmd = [sys.executable, 'tools/evaluate_temporal_screen.py', '--profile', 'seg',
+                       '--checkpoint', str(checkpoint_dir / f'epoch_{args.epochs:04d}.pt'),
+                       '--data_root', args.data_root, '--output_dir', str(seg_output),
+                       '--batch_size', str(args.audit_batch_size), '--num_workers', str(args.num_workers),
+                       '--seed', str(args.seed)]
+                if args.smoke:
+                    cmd.append('--smoke')
+                run_command(cmd, name + '/screen_seg_final', root, timings)
+            if not (seg_output / 'metrics.json').is_file():
+                raise RuntimeError(f'Segmentation marker without metrics: {seg_output}')
+            summarize(root)
         anchor_names = {entry[0] for entry in experiment_matrix('core')}
         run_anchor = args.anchors == 'core' and name in anchor_names
         run_anchor = run_anchor or (args.anchors == 'baselines' and name in {'echocardmae_video_port','videomae_matched','videomae_standard'})
@@ -434,7 +467,7 @@ def main():
                         remove_owned_checkpoint(anchor_ckpt / file, checkpoint_dir, anchor_dir,
                                                 'fine-tuning completed; best model retained')
         prune_completed_resume(checkpoint_dir, destination, args.epochs, args.audit_epochs,
-                               keep=args.keep_completed_resume, audited=not args.no_audit)
+                               keep=args.keep_completed_resume or args.audit_profile == 'quick', audited=not args.no_audit)
     summarize(root)
     archive_analysis(root)
     print(f'Completed selected stages. Reports: {root}')

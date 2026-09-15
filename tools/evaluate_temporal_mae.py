@@ -212,6 +212,11 @@ class ProbeSegDataset(EchoNetSegmentationDataset):
     def __init__(self, root, split, args, channels):
         super().__init__(root, split, 112)
         self.context = args.audit_frames
+        self.target_index = getattr(args, 'seg_target_index', None)
+        if self.target_index is None:
+            self.target_index = self.context // 2
+        if not 0 <= self.target_index < self.context:
+            raise ValueError('Segmentation target index must lie inside the sampled context.')
         self.channels = channels
         self.input_protocol = args.input_protocol
         rng = np.random.default_rng(args.seed)
@@ -236,8 +241,8 @@ class ProbeSegDataset(EchoNetSegmentationDataset):
         center = sample['frame']
         if not 0 <= center < len(raw):
             raise ValueError(f'Tracing frame out of bounds: {sample["stem"]}, {center}')
-        # Centered temporal context, with explicit invalid padding, never repeated motion.
-        indices = center + np.arange(self.context) - self.context // 2
+        # Anchor the labeled frame at target_index; pad missing context, never repeat motion.
+        indices = center + np.arange(self.context) - self.target_index
         valid = (indices >= 0) & (indices < len(raw))
         clip = np.zeros((self.context, *raw.shape[1:]), dtype=raw.dtype)
         clip[valid] = raw[indices[valid]]
@@ -246,7 +251,7 @@ class ProbeSegDataset(EchoNetSegmentationDataset):
             raise ValueError('EchoNet tracing probes require the native 112x112 coordinate system.')
         mask = _rasterize_echonet_trace(sample['trace'], (112, 112))
         return dict(video=video, frame_valid=torch.from_numpy(valid), mask=torch.from_numpy(mask).long(),
-                    target_index=self.context // 2, phase=int(center == self.ed_frame[sample['stem']]),
+                    target_index=self.target_index, phase=int(center == self.ed_frame[sample['stem']]),
                     id=sample['stem'] + ':' + str(center))
 
 
@@ -255,7 +260,8 @@ def seg_features(model, dataset, args, device):
     features, masks, phase, ids, state_features = [], [], [], [], []
     for batch in tqdm(make_loader(dataset, args), desc='frozen segmentation'):
         seq, _, states = stream(model, batch['video'].to(device), batch['frame_valid'].to(device))
-        token = seq[:, args.audit_frames // 2]
+        target_indices = batch['target_index'].to(device)
+        token = seq[torch.arange(len(seq), device=device), target_indices]
         side = int(token.shape[1] ** .5)
         fmap = token.transpose(1, 2).reshape(len(token), -1, side, side)
         features.append(F.interpolate(fmap, (14, 14), mode='bilinear', align_corners=False).cpu())
@@ -263,8 +269,8 @@ def seg_features(model, dataset, args, device):
         phase.append(batch['phase'])
         ids.extend(batch['id'])
         if states is not None:
-            state_index = min(args.audit_frames//2//model.local_frames,states.shape[1]-1)
-            state_features.append(states[:,state_index].cpu())
+            state_index = (target_indices // model.local_frames).clamp_max(states.shape[1]-1)
+            state_features.append(states[torch.arange(len(states), device=device), state_index].cpu())
     return (torch.cat(features).clone(), torch.cat(masks).clone(), torch.cat(phase).clone(), ids,
             torch.cat(state_features).clone() if state_features else None)
 
@@ -297,6 +303,9 @@ def segmentation_probe(train, val, args, device):
             inter += float(intersection.sum())
             denom += float(denominator.sum())
             rows.extend(dict(id=ids[start+i], dice=float(v)) for i, v in enumerate(dice))
+    if getattr(args, 'skip_seg_auxiliary', False):
+        return dict(dice_mean=float(np.mean([r['dice'] for r in rows])),
+                    dice_global=2 * inter / max(1, denom), steps=args.seg_steps, grid=14), rows
     # ED/ES is an area-derived binary proxy, not a dense cardiac phase annotation.
     fit = ridge_fit(x.mean((2, 3)), F.one_hot(phase.long(), 2).float())
     phase_prediction = ridge_apply(fit, xv.mean((2, 3))).argmax(1)
