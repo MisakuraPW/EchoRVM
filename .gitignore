@@ -24,6 +24,12 @@ conda_env/
 docs/*
 !docs/rmae_model_and_training.md
 !docs/downstream_finetune.md
+!docs/心超MAE_研究记录.xlsx
+!docs/科研研究操作系统_Agent协作协议_v2.md
+!docs/研究记录维护.md
+!docs/stage2_interface_diagnostics.md
+!docs/AGENTS.md
+docs/~$*.xlsx
 资料/
 
 # Logs and experiment trackers

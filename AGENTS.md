@@ -5,3 +5,4 @@
 - Do not commit credentials, datasets, model checkpoints, generated outputs, or unrelated research records as part of code delivery.
 - Never force-push or overwrite remote changes. If verification, authentication, networking, or remote divergence blocks delivery, report the blocker and do not claim the server can pull the change yet.
 - Report the pushed commit and the server-side pull/run commands when relevant. Do not stop or restart server workloads unless separately authorized.
+- The authoritative research workbook and its maintenance documents also belong to this repository (`MisakuraPW/EchoRVM`). After an authorized research-record update and verification, commit and push those task-scoped files automatically as well. Separate commits are allowed, but do not leave a completed authorized workbook update unpublished merely because it is not code. Follow `docs/AGENTS.md` for content permissions.
