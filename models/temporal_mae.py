@@ -118,7 +118,7 @@ class TemporalMAE(EchoVideoMAE):
         return state
 
     def _unroll(self, video, frame_valid=None, reconstruct=False,
-                intervention='normal', reset_interval=0, masks=None):
+                intervention='normal', reset_interval=0, masks=None, return_local=False):
         if tuple(video.shape[1:]) != (self.frames, self.in_chans, self.img_size, self.img_size):
             raise ValueError(f'TemporalMAE expects T={self.frames}, C={self.in_chans}, H=W={self.img_size}.')
         b = video.shape[0]
@@ -126,6 +126,7 @@ class TemporalMAE(EchoVideoMAE):
             frame_valid = torch.ones(b, self.frames, dtype=torch.bool, device=video.device)
         state, short = None, None
         features, states, predictions, targets, used_masks = [], [], [], [], []
+        local_features = []
         loss_sum, weight_sum = video.new_zeros(()), video.new_zeros(())
         frequency_sum = video.new_zeros(())
         read_gates, write_gates = [], []
@@ -143,6 +144,11 @@ class TemporalMAE(EchoVideoMAE):
                     b, self.token_grid, self.mask_ratio, self.research_mask,
                     video.device, i, spatial_order)
             encoded, _ = self.encode_video(clip, mask)
+            if return_local:
+                if reconstruct:
+                    raise ValueError('Local diagnostics require unmasked inference.')
+                local_features.append(encoded.reshape(b, gt, gh * gw, self.embed_dim)
+                                      * tv[:, :, None, None])
             descriptor = None
             if self.frequency_conditioned:
                 with torch.no_grad():
@@ -219,6 +225,8 @@ class TemporalMAE(EchoVideoMAE):
                 result['frequency_read_gate'] = torch.stack(read_gates).mean() if read_gates else loss.new_zeros(())
         else:
             result['features'] = torch.cat(features, 1)
+            if return_local:
+                result['local_features'] = torch.cat(local_features, 1)
         return result
 
     def forward(self, video, frame_valid=None, masks=None):
@@ -230,3 +238,7 @@ class TemporalMAE(EchoVideoMAE):
 
     def state_trajectory(self, video, frame_valid=None, intervention='normal', reset_interval=0):
         return self._unroll(video, frame_valid, intervention=intervention, reset_interval=reset_interval)
+
+    def diagnostic_features(self, video, frame_valid=None):
+        """Paired local/fused exits from one normal unroll; no new parameters."""
+        return self._unroll(video, frame_valid, return_local=True)
