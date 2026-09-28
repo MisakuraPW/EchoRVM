@@ -105,6 +105,10 @@ def load_videomae_init(model: torch.nn.Module, checkpoint_path: str | Path, map_
                 continue
             dst_tensor = dst[dst_key]
             if dst_key == "patch_embed.proj.weight":
+                if (getattr(model, 'patch_init_temporal_sum', False) and src_tensor.ndim == 5
+                        and dst_tensor.shape[2] == 1):
+                    # Tubelet1 reference: preserve response on temporally constant input.
+                    src_tensor = src_tensor.sum(dim=2, keepdim=True)
                 converted = _convert_patch_embed(src_tensor, dst_tensor)
                 if converted is None:
                     skipped[src_key] = f"shape {tuple(src_tensor.shape)} -> {tuple(dst_tensor.shape)}"

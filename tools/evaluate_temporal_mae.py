@@ -116,6 +116,8 @@ def inference_benchmark(model, dataset, args, device):
 @torch.inference_mode()
 def stream(model, video, valid, intervention='normal', reset_interval=0):
     """Every method sees the same raw frames; native windows reset at boundaries."""
+    if getattr(model, 'frame_readout', 'repeat') != 'repeat':
+        raise ValueError('Legacy temporal audit cannot evaluate learned frame expansion; use tools/evaluate_stage2.py')
     native = model.frames
     outputs, state_rows = [], []
     for start in range(0, video.shape[1], native):

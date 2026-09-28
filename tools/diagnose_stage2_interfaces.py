@@ -168,7 +168,7 @@ def ef_probes(train, val, args):
     return result,predictions
 
 
-def seg_probe(train, val, name, args, device, tubelet):
+def seg_probe(train, val, name, args, device, tubelet, prediction_callback=None):
     feature = 'fused' if name in {'shared_bank','offset_bank'} else name
     bank = name in {'shared_bank','offset_bank'}
     torch.manual_seed(args.seed+2001)
@@ -203,6 +203,8 @@ def seg_probe(train, val, name, args, device, tubelet):
             logits = head(xv[start:stop].to(device),offsets)
             pred = F.interpolate(logits,val['y'].shape[-2:],mode='bilinear',align_corners=False).argmax(1).cpu()
             target = torch.from_numpy(val['y'][start:stop])
+            if prediction_callback is not None:
+                prediction_callback(start, pred, target)
             inter = ((pred==1)&(target==1)).sum((1,2))
             denom = (pred==1).sum((1,2))+(target==1).sum((1,2))
             for j in range(len(pred)):

@@ -38,6 +38,8 @@ def paired_bootstrap(rows_a, rows_b, field, seed=42, repetitions=2000):
 @torch.inference_mode()
 def extract_batch(model, video, valid, device, target_indices=None, amp=True):
     """Reduce each native window immediately; never retain full-video token maps."""
+    if getattr(model, 'frame_readout', 'repeat') != 'repeat':
+        raise ValueError('Legacy tubelet audit cannot evaluate learned frame expansion; use tools/evaluate_stage2.py')
     batch, frames = valid.shape
     if frames % model.frames:
         raise ValueError('Audit frame count must be a multiple of the checkpoint native window')

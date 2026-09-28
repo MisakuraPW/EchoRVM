@@ -84,6 +84,61 @@ class TemporalMAE(EchoVideoMAE):
             if self.memory_mode == 'none':
                 raise ValueError('Frequency-conditioned memory requires an active memory core')
             self.frequency_gates = FrequencyMemoryGates(self.embed_dim)
+        self.frame_readout = str(cfg.get('frame_readout', 'repeat'))
+        self.patch_init_temporal_sum = bool(cfg.get('patch_init_temporal_sum', False))
+        if self.frame_readout not in {'repeat', 'learned'}:
+            raise ValueError('frame_readout must be repeat or learned')
+        if self.frame_readout == 'learned':
+            if self.tubelet_size != 2 or self.norm_pix_loss or self.frequency_loss_weight:
+                raise ValueError('Learned frame expansion requires tubelet2, raw targets, no frequency loss')
+            from .frame_readout import FrameExpansion
+            self.frame_expansion = FrameExpansion(self.embed_dim, self.tubelet_size)
+            self.decoder_pred = nn.Linear(self.decoder_pred.in_features,
+                                          self.patch_size**2 * self.in_chans)
+            nn.init.xavier_uniform_(self.decoder_pred.weight)
+            nn.init.zeros_(self.decoder_pred.bias)
+            from .video_mae import flat_sinusoid, get_3d_sincos_pos_embed
+            _, gh, gw = self.token_grid
+            dim = self.decoder_pred.in_features
+            pos = (flat_sinusoid(dim, self.local_frames * gh * gw)
+                   if cfg.get('position_embedding') == 'flat_sinusoid' else
+                   get_3d_sincos_pos_embed(dim, self.local_frames, gh, gw))
+            self.register_buffer('frame_decoder_pos_embed', pos, persistent=False)
+
+    def frame_features(self, features):
+        """[B,tubelets,patches,D] -> [B,frames,patches,D], shared with MAE."""
+        if self.frame_readout == 'learned':
+            return self.frame_expansion(features)
+        return features.repeat_interleave(self.tubelet_size, dim=1)
+
+    def _decode(self, encoded, mask, previous):
+        b = encoded.shape[0]
+        if self.frame_readout == 'learned':
+            # Expand only visible encoder tokens. Hidden pixels have no shortcut.
+            gt, gh, gw = self.token_grid
+            dense = encoded.new_zeros(b, gt * gh * gw, self.embed_dim)
+            dense[~mask] = encoded.reshape(-1, self.embed_dim)
+            expanded = self.frame_features(dense.reshape(b, gt, gh * gw, -1)).flatten(1, 2)
+            frame_mask = mask.reshape(b, gt, gh * gw).repeat_interleave(self.tubelet_size, 1).flatten(1)
+            decoded = self.decoder_embed(expanded[~frame_mask].reshape(b, -1, self.embed_dim))
+            full = self.mask_token.to(decoded).expand(b, frame_mask.shape[1], -1).clone()
+            full[~frame_mask] = decoded.reshape(-1, decoded.shape[-1])
+            pos = self.frame_decoder_pos_embed.to(full)
+        else:
+            decoded = self.decoder_embed(encoded)
+            full = self.mask_token.to(decoded).expand(b, self.patch_embed.num_patches, -1).clone()
+            full[~mask] = decoded.reshape(-1, decoded.shape[-1])
+            pos = self.decoder_pos_embed.to(full)
+        full = full + pos
+        if previous is not None:
+            full = self.memory_fusion(full, self.memory_to_decoder(previous).to(full))
+        full = self.run_blocks(full, self.decoder_blocks)
+        pred = self.decoder_pred(self.decoder_norm(full))
+        if self.frame_readout == 'learned':
+            # Restore original tubelet_patchify order: (time, spatial, offset, pixels).
+            pred = pred.reshape(b, gt, self.tubelet_size, gh * gw, -1)
+            pred = pred.permute(0, 1, 3, 2, 4).reshape(b, gt * gh * gw, -1)
+        return pred
 
     def _pool(self, encoded, mask, valid):
         b, _, dim = encoded.shape
@@ -118,13 +173,19 @@ class TemporalMAE(EchoVideoMAE):
         return state
 
     def _unroll(self, video, frame_valid=None, reconstruct=False,
-                intervention='normal', reset_interval=0, masks=None, return_local=False):
-        if tuple(video.shape[1:]) != (self.frames, self.in_chans, self.img_size, self.img_size):
+                intervention='normal', reset_interval=0, masks=None, return_local=False,
+                initial_state=None, initial_short=None, streaming=False):
+        frames = video.shape[1]
+        expected_frames = frames if streaming else self.frames
+        if (frames < 1 or frames % self.local_frames or
+                tuple(video.shape[1:]) != (expected_frames, self.in_chans, self.img_size, self.img_size)):
             raise ValueError(f'TemporalMAE expects T={self.frames}, C={self.in_chans}, H=W={self.img_size}.')
         b = video.shape[0]
         if frame_valid is None:
-            frame_valid = torch.ones(b, self.frames, dtype=torch.bool, device=video.device)
-        state, short = None, None
+            frame_valid = torch.ones(b, frames, dtype=torch.bool, device=video.device)
+        if frame_valid.shape != (b, frames):
+            raise ValueError('frame_valid must match [B,T]')
+        state, short = initial_state, initial_short
         features, states, predictions, targets, used_masks = [], [], [], [], []
         local_features = []
         loss_sum, weight_sum = video.new_zeros(()), video.new_zeros(())
@@ -168,14 +229,7 @@ class TemporalMAE(EchoVideoMAE):
                     encoded = fused
             pooled = self._pool(encoded, mask, valid)
             if reconstruct:
-                decoded = self.decoder_embed(encoded)
-                full = self.mask_token.to(decoded).expand(b, self.patch_embed.num_patches, -1).clone()
-                full[~mask] = decoded.reshape(-1, decoded.shape[-1])
-                full = full + self.decoder_pos_embed.to(full)
-                if previous is not None:
-                    full = self.memory_fusion(full, self.memory_to_decoder(previous).to(full))
-                full = self.run_blocks(full, self.decoder_blocks)
-                pred = self.decoder_pred(self.decoder_norm(full))
+                pred = self._decode(encoded, mask, previous)
                 target = tubelet_patchify(self._normalize_input(clip), self.tubelet_size, self.patch_size)
                 if self.norm_pix_loss:
                     target = (target - target.mean(-1, keepdim=True)) / (
@@ -209,6 +263,8 @@ class TemporalMAE(EchoVideoMAE):
                 dense = encoded.reshape(b, gt, gh, gw, self.embed_dim)
                 features.append(dense.reshape(b, gt, gh * gw, self.embed_dim) * tv[:, :, None, None])
         result = {'states': torch.stack(states, 1)}
+        if streaming:
+            result.update(final_state=state, final_short=short)
         if reconstruct:
             if not bool(weight_sum > 0):
                 raise ValueError('No valid masked tubelets: video is too short for this configuration.')
@@ -242,3 +298,23 @@ class TemporalMAE(EchoVideoMAE):
     def diagnostic_features(self, video, frame_valid=None):
         """Paired local/fused exits from one normal unroll; no new parameters."""
         return self._unroll(video, frame_valid, return_local=True)
+
+    def stream_clip(self, video, state=None, short_state=None, frame_valid=None):
+        """Process ONE complete local clip; caller owns patient reset and detachment.
+
+        Attention within the clip is bidirectional. Outputs become available at
+        clip end, not at each incoming frame. This does not truncate BPTT.
+        """
+        if video.shape[1] != self.local_frames:
+            raise ValueError('stream_clip requires exactly local_frames frames')
+        if self.memory_mode == 'none' and (state is not None or short_state is not None):
+            raise ValueError('A no-memory model cannot accept recurrent state')
+        if short_state is not None and self.memory_mode != 'dual':
+            raise ValueError('short_state is only valid for dual memory')
+        for value in (state, short_state):
+            if value is not None:
+                slots = 1 if self.memory_mode == 'global' else self.memory_grid**2
+                if value.shape != (len(video), slots, self.embed_dim) or value.device != video.device:
+                    raise ValueError('State batch, slots, width or device mismatch')
+        return self._unroll(video, frame_valid, return_local=True, streaming=True,
+                            initial_state=state, initial_short=short_state)

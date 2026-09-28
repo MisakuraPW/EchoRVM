@@ -1,0 +1,65 @@
+experiment:
+  name: stage2_ef
+  seed: 42
+  output_root: /root/autodl-tmp/outputs_stage2/full_finetune/result
+data:
+  dataset_name: EchoNet-Dynamic
+  data_root: /root/autodl-tmp/datasets/EchoNet-Dynamic
+  input_protocol: gray_repeat3
+  train_split: train
+  val_split: val
+  num_workers: 8
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2
+  drop_last: false
+augment:
+  enabled: true
+  preset: A4_tgc_zoom_speckle
+  per_frame_random: false
+  img_size: 112
+model:
+  backbone_checkpoint: null
+  strict_backbone: true
+  img_size: 112
+  frames: 128
+  prefix_frames: 64
+  recent_frames: 64
+  stage2_ef_readout: cache
+  head_hidden_dim: 64
+  gradient_checkpointing: true
+optimizer:
+  name: adamw
+  lr: 5.0e-5
+  weight_decay: 1.0e-4
+scheduler:
+  name: cosine
+  warmup_epochs: 5
+  min_lr: 1.0e-6
+train:
+  epochs: 80
+  batch_size: 1
+  grad_accum_steps: 32
+  mixed_precision: true
+  clip_grad_norm: 1.0
+  smooth_l1_beta: 1.0
+  plot_interval: 1
+  freeze_backbone: false
+checkpoint:
+  auto_resume: true
+  save_last: true
+  save_last_every_n_epochs: 10
+  save_best: true
+  best_weights_only: true
+  save_every_n_epochs: 0
+  monitor: mae
+  mode: min
+  min_free_gb: 3
+logging:
+  use_tqdm: true
+  use_tensorboard: true
+  save_plots: true
+early_stopping:
+  enabled: true
+  patience: 15
+  min_delta: 1.0e-4

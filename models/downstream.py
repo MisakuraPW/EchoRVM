@@ -179,7 +179,8 @@ class EchoVideoMAEBackbone(nn.Module):
                 indices = torch.linspace(0, video.shape[1] - 1, expected, device=video.device).round().long()
                 video = video.index_select(1, indices)
         tokens = self.rmae.forward_features(video)
-        tokens = tokens.repeat_interleave(self.rmae.tubelet_size, dim=1)
+        tokens = (self.rmae.frame_features(tokens) if isinstance(self.rmae, TemporalMAE)
+                  else tokens.repeat_interleave(self.rmae.tubelet_size, dim=1))
         tokens = tokens[:, :expected]
         return {"encoded": tokens, "outputs": tokens, "states": tokens}
 

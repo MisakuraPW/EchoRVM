@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import shutil
 import sys
@@ -77,6 +78,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefetch_factor", type=int, default=None)
     parser.add_argument("--data_root", default=None)
     parser.add_argument("--frames", type=int, default=None)
+    parser.add_argument('--ef_readout', choices=['last','cache','cache_empty','cache_history',
+                        'local_empty','local_history','state','joint_recent'], default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight_decay", type=float, default=None)
     parser.add_argument("--freeze_backbone", action="store_true")
@@ -108,6 +111,7 @@ def apply_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> list[s
     set_value("data", "num_workers", args.num_workers)
     set_value("data", "prefetch_factor", args.prefetch_factor)
     set_value("model", "frames", args.frames)
+    set_value('model', 'stage2_ef_readout', getattr(args, 'ef_readout', None))
     set_value("checkpoint", "dir", args.checkpoint_dir)
     set_value("checkpoint", "save_last_every_n_epochs", args.save_last_every)
     if args.pretrained is not None:
@@ -175,6 +179,13 @@ def build_dataset(cfg: dict[str, Any], task: str, split: str):
     if not root:
         raise ValueError("data.data_root is required")
     if task == "echonet_ef":
+        if model_cfg.get('stage2_ef_readout'):
+            from utils.stage2_data import CompleteHistoryEchoDataset
+            if per_frame:
+                raise ValueError('Stage-two EF requires clip-consistent augmentation')
+            return CompleteHistoryEchoDataset(root,split_name,int(model_cfg['frames']),img_size=img_size,
+                channels=3,input_protocol=data_cfg.get('input_protocol','gray_repeat3'),
+                limit=limit,seed=seed,random_start=split=='train',aug_cfg=aug)
         return EchoNetEFDataset(
             root,
             split_name,
@@ -311,6 +322,8 @@ def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) ->
             logger.info("hiera backbone frozen; training head only")
         return model.to(device)
     rmae, loaded_model_cfg, report = load_pretrained_rmae(ckpt_path, fallback_model_cfg=model_cfg, map_location=device)
+    if 'gradient_checkpointing' in model_cfg and hasattr(rmae, 'gradient_checkpointing'):
+        rmae.gradient_checkpointing = bool(model_cfg['gradient_checkpointing'])
     if model_cfg.get('strict_backbone', False) and (report['missing'] or report['unexpected']):
         raise RuntimeError(f'Backbone checkpoint mismatch: {report}')
     seed_everything(int(cfg.get('experiment', {}).get('seed', 42)) + 2001)
@@ -332,11 +345,21 @@ def build_model(cfg: dict[str, Any], task: str, device: torch.device, logger) ->
             decoder_num_heads=int(model_cfg.get("decoder_num_heads", 3)),
         )
     elif task == "echonet_ef":
-        model = EchoEFFineTuner(
-            rmae,
-            hidden_dim=int(model_cfg.get("head_hidden_dim", 256)),
-            dropout=float(model_cfg.get("head_dropout", 0.2)),
-        )
+        if model_cfg.get('stage2_ef_readout'):
+            from models.temporal_mae import TemporalMAE
+            from models.ef_readout import Stage2EFFineTuner
+            if not isinstance(rmae,TemporalMAE):
+                raise ValueError('Stage-two EF requires a TemporalMAE checkpoint')
+            rmae.gradient_checkpointing=bool(model_cfg.get('gradient_checkpointing',True))
+            model=Stage2EFFineTuner(rmae,model_cfg['stage2_ef_readout'],
+                int(model_cfg.get('recent_frames',64)),int(model_cfg.get('prefix_frames',64)),
+                int(model_cfg.get('head_hidden_dim',64)))
+        else:
+            model = EchoEFFineTuner(
+                rmae,
+                hidden_dim=int(model_cfg.get("head_hidden_dim", 256)),
+                dropout=float(model_cfg.get("head_dropout", 0.2)),
+            )
     else:
         raise ValueError(task)
     if bool(cfg.get("train", {}).get("freeze_backbone", False)):
@@ -444,6 +467,8 @@ def run_epoch(
     max_steps = train_cfg.get("max_steps")
     max_steps = int(max_steps) if max_steps is not None else None
     model.train(train)
+    if hasattr(loader.dataset, 'set_epoch'):
+        loader.dataset.set_epoch(epoch if train else 0)
     loss_meter = AverageMeter()
     data_meter = AverageMeter()
     step_meter = AverageMeter()
@@ -582,6 +607,12 @@ def main() -> int:
     val_loader = build_loader(cfg, task, "val")
     logger.info("train_loader samples=%d batches=%d", len(train_loader.dataset), len(train_loader))
     logger.info("val_loader samples=%d batches=%d", len(val_loader.dataset), len(val_loader))
+    if cfg.get('model', {}).get('stage2_ef_readout'):
+        manifest = {split: dict(included=loader.dataset.ids, excluded=loader.dataset.excluded)
+                    for split, loader in [('train',train_loader),('val',val_loader)]}
+        (run_dir/'history_dataset_manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+        logger.info('real_history excluded train=%d val=%d',
+                    len(train_loader.dataset.excluded),len(val_loader.dataset.excluded))
     log_split_overlap(train_loader, val_loader, logger)
     grad_accum = max(1, int(cfg.get("train", {}).get("grad_accum_steps", 1)))
     scheduler = build_scheduler(optimizer, cfg, steps_per_epoch=max(1, math.ceil(len(train_loader) / grad_accum)))
