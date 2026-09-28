@@ -61,6 +61,21 @@ bash scripts/run_stage2_questions.sh --phase train --local_frames 16 --variants 
 
 四项共同设置：总64帧、stride1、112px、patch8、同一个VideoMAE初始化来源、同一训练划分、tube mask .75、原始像素目标、AdamW lr1e-4/wd.05、有效batch32。沿用当前时域基线的无增强协议，不擅自替换为A4。repeat/learned/tubelet1使用同一固定spatial状态；joint是L64、1clip、无状态的匹配整窗模型。
 
+### 复用一阶段对照，不重复训练
+
+2026-09-29用户确定以L16作为二阶段工作长度；这不是宣称其性能显著更优。近期窗口仍为64帧，缓存4个clip；历史前缀为真实64帧。旧L8诊断保留为独立结果，不混入本队列。
+
+```bash
+CONTROL=/root/autodl-tmp/outputs_stage1/stage1_lengths_20260928/ckpt/spatial_l16/epoch_0100.pt
+bash scripts/run_stage2_questions.sh --phase train --local_frames 16 \
+  --variants repeat learned tubelet1 joint --epochs 100 \
+  --reuse_control "$CONTROL" --run_tag stage2_l16_20260929
+```
+
+这会先重新评估L16旧权重，然后依次训练learned、tubelet1、joint并各做终点评估，只有三次新增MAE预训练。不会复制对照权重，不会自动全量微调。joint按定义仍为64帧整窗参照，并非16帧局部模型。
+
+`--reuse_control` 检查保存配置中的结构、初始化路径、数据协议、有效batch、每轮采样预算、优化器、种子及epoch，允许不同输出位置与吞吐运行参数。记录源checkpoint的SHA256与完整配置；该检查不冒充旧代码/历史初始化文件字节的认证。400轮权重不能冒充100轮对照。相同命令可续跑；预检用 `--dry_run`，它只展示计划，不读取权重认证。`--smoke` 不接受复用100轮对照，应使用独立小预算队列。
+
 只在终点做上述小头评估，MAE重建验证每25轮，仅监控，不早停、不据它挑最佳表示。不会每50轮训练分割/EF，也不自动全量微调。
 
 ## 4. 效率、保存与恢复

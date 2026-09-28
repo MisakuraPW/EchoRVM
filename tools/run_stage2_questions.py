@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import csv
 import json
 from pathlib import Path
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 
 import yaml
+import torch
 
 from tools.run_temporal_research import make_config, run_command, archive_analysis
 from tools.evaluate_stage2 import code_hash
@@ -21,6 +23,43 @@ from utils.research_storage import check_protocol
 from utils.stage2_diagnostics import paired_bootstrap
 
 VARIANTS = ('repeat','learned','tubelet1','joint')
+
+
+def reuse_training_contract(config):
+    """Compare scientific settings, not output paths or tuned runtime settings."""
+    cfg = copy.deepcopy(config)
+    cfg['experiment'] = {'seed': cfg['experiment']['seed']}
+    for key in ('checkpoint', 'logging', 'runtime', 'autotune'):
+        cfg.pop(key, None)
+    model = cfg['model']
+    model.pop('gradient_checkpointing', None)
+    model.setdefault('frame_readout', 'repeat')
+    for key in ('num_workers', 'pin_memory', 'persistent_workers', 'prefetch_factor'):
+        cfg['data'].pop(key, None)
+    train = cfg['train']
+    batch = int(train.pop('batch_size'))
+    train['effective_batch'] = batch * int(train.pop('grad_accum_steps', 1))
+    train.setdefault('epoch_sample_batch', batch)
+    for key in ('log_interval', 'val_interval', 'plot_interval'):
+        train.pop(key, None)
+    return cfg
+
+
+def validate_reused_control(path, expected):
+    payload = torch.load(path, map_location='cpu', weights_only=False)
+    if payload.get('partial_epoch') or payload.get('epoch') != expected['train']['epochs']:
+        raise ValueError('Reused control must be a complete checkpoint at the requested epoch')
+    if not payload.get('model_state_dict') or not isinstance(payload.get('config'), dict):
+        raise ValueError('Reused control needs model_state_dict and its saved training config')
+    actual = reuse_training_contract(payload['config'])
+    target = reuse_training_contract(expected)
+    if actual != target:
+        changed = sorted(k for k in actual.keys() | target.keys() if actual.get(k) != target.get(k))
+        raise ValueError(f'Reused control training protocol mismatch in: {changed}')
+    return dict(path=str(Path(path).resolve()), sha256=file_hash(path), epoch=payload['epoch'],
+                training_contract=actual, source_config=payload['config'],
+                note='Reused without training or copying weights. Saved config checked; '
+                     'historical source code/initial-file bytes are not certified by this check.')
 
 
 def stage_config(args, variant, checkpoint_dir):
@@ -101,6 +140,7 @@ def parse_args():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--phase',choices=['diagnose','train'],default='diagnose')
     p.add_argument('--checkpoint',help='Existing TemporalMAE; required for diagnose')
+    p.add_argument('--reuse_control',help='Reuse a matched final repeat checkpoint in a training queue')
     p.add_argument('--variants',nargs='+',choices=VARIANTS,default=['repeat','learned'])
     p.add_argument('--local_frames',type=int,choices=[4,8,16,32],default=16)
     p.add_argument('--epochs',type=int,default=100)
@@ -118,6 +158,8 @@ def parse_args():
     args=p.parse_args()
     if args.phase=='diagnose' and not args.checkpoint:
         p.error('--checkpoint is required for diagnose; no fallback to random initialization')
+    if args.reuse_control and (args.phase!='train' or 'repeat' not in args.variants or args.smoke):
+        p.error('--reuse_control requires train phase with repeat, and cannot be used with --smoke')
     if len(set(args.variants))!=len(args.variants) or args.epochs<1 or args.num_workers<0 or args.eval_batch_size<0:
         p.error('Invalid budget or duplicate variants')
     if not args.run_tag or Path(args.run_tag).name!=args.run_tag or args.run_tag in ('.','..') or '\\' in args.run_tag:
@@ -137,18 +179,23 @@ def main():
     configs={name:stage_config(args,name,weights/name) for name in names} if args.phase=='train' else {}
     for name in names:
         print(f'{args.phase}: {name}, L={configs[name]["model"]["local_frames"] if configs else "checkpoint"}, '
-              f'epochs={args.epochs if configs else 0}, endpoint only; result={result/name}',flush=True)
+              f'epochs={args.epochs if configs else 0}, '
+              f'action={"reuse+evaluate" if name=="repeat" and args.reuse_control else args.phase}, '
+              f'endpoint only; result={result/name}',flush=True)
     if args.dry_run:
         return
     init=Path(args.init_checkpoint if args.phase=='train' else args.checkpoint)
     for path in (init,Path(args.data_root)/'FileList.csv',Path(args.data_root)/'VolumeTracings.csv'):
         if not path.is_file():
             raise FileNotFoundError(path)
+    reused = validate_reused_control(args.reuse_control, configs['repeat']) if args.reuse_control else None
     result.mkdir(parents=True,exist_ok=True)
     identity=dict(code_sha256=code_hash(),runner_sha256=file_hash(__file__),init_sha256=file_hash(init),
         phase=args.phase,local_frames=args.local_frames,epochs=args.epochs,seed=args.seed,ef_head=args.ef_head,
         filelist_sha256=file_hash(Path(args.data_root)/'FileList.csv'),
         traces_sha256=file_hash(Path(args.data_root)/'VolumeTracings.csv'))
+    if reused:
+        identity['reused_control_sha256'] = reused['sha256']
     guard=result/'identity.json'
     if guard.exists() and json.loads(guard.read_text(encoding='utf-8'))!=identity:
         raise RuntimeError('Run identity changed; use a new run_tag')
@@ -163,7 +210,10 @@ def main():
         out=result/name
         out.mkdir(exist_ok=True)
         checkpoint=init
-        if configs:
+        if configs and name=='repeat' and reused:
+            checkpoint = Path(reused['path'])
+            save_json(out/'reused_control.json', reused)
+        elif configs:
             cfg=configs[name]
             digest=check_protocol(out,cfg)
             (out/'protocol.sha256').write_text(digest+'\n')
