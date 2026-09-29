@@ -152,6 +152,7 @@ def evaluate(args):
         seg_train_cases=args.seg_train_cases, seg_val_cases=args.seg_val_cases,
         stream_cases=args.stream_cases, stream_frames=args.stream_frames,
         seg_steps=args.seg_steps, positions=list(range(48,64)), meta=meta,
+        train_all_positions=args.train_all_positions,
         filelist_sha256=file_hash(Path(args.data_root)/'FileList.csv'),
         traces_sha256=file_hash(Path(args.data_root)/'VolumeTracings.csv'))
     guard = out/'protocol.json'
@@ -166,7 +167,17 @@ def evaluate(args):
     sample_data = TemporalEchoDataset(args.data_root, 'val', 64, channels=model.in_chans,
         input_protocol=args.input_protocol, seed=args.seed, random_start=False)
     save_json(out/'runtime.json', tune_runtime(model, sample_data, args, device, train[0]))
-    tr = extract(model, train, args, device, 'seg', 'real', cache_dir/'train.npz', identity)
+    training = []
+    for target in range(48,64,2) if args.train_all_positions else (62,):
+        cfg = copy.copy(args)
+        cfg.seg_target_index = target
+        dataset = SegViews(args.data_root, 'train', cfg, model.in_chans, 2)
+        item = extract(model, dataset, args, device, 'seg', 'real', cache_dir/f'train_{target}.npz', identity)
+        training.append({k:item[k] for k in ('fused','y','rows')})
+        (cache_dir/f'train_{target}.npz').unlink()
+    tr = {k:np.concatenate([v[k] for v in training]) for k in ('fused','y')}
+    tr['rows'] = [r for v in training for r in v['rows']]
+    del training, item
     values = []
     for target in range(48, 64, 2):
         cfg = copy.copy(args)
@@ -184,7 +195,6 @@ def evaluate(args):
     write_csv(out/'seg_position_summary.csv', position_summary(rows))
     write_csv(out/'seg_head_loss.csv', losses)
     del tr, combined, values, va
-    (cache_dir/'train.npz').unlink()
 
     data = TemporalEchoDataset(args.data_root, 'val', args.stream_frames, channels=model.in_chans,
         input_protocol=args.input_protocol, seed=args.seed, random_start=False)
@@ -221,6 +231,8 @@ def main():
         batch_size=0, max_batch_size=32, num_workers=8, prefetch_factor=2, recent_frames=64).items():
         p.add_argument('--'+key, type=int, default=value)
     p.add_argument('--seg_lr', type=float, default=.01)
+    p.add_argument('--train_all_positions', action='store_true',
+                   help='Keep head/steps fixed; balance training across all16 local positions')
     p.add_argument('--auto_workers', action=argparse.BooleanOptionalAction, default=True)
     args = p.parse_args()
     if args.stream_frames <= 64 or args.stream_frames % 16 or min(args.stream_cases,args.seg_train_cases,args.seg_val_cases,args.seg_steps) < 1:
