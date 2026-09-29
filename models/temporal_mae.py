@@ -73,8 +73,28 @@ class TemporalMAE(EchoVideoMAE):
             self.feature_fusion = CrossBlock(self.embed_dim, int(cfg.get('num_heads', 6)))
         if self.memory_mode == 'dual':
             self.short_gate = nn.Parameter(torch.zeros(()))
+        self.memory_compression = str(cfg.get('memory_compression', 'mean'))
+        self.memory_write_source = str(cfg.get('memory_write_source', 'fused'))
+        if self.memory_compression not in {'mean', 'temporal_attention'}:
+            raise ValueError('Unknown memory_compression')
+        if self.memory_write_source not in {'fused', 'local'}:
+            raise ValueError('Unknown memory_write_source')
+        if self.memory_compression == 'temporal_attention':
+            if self.memory_mode not in {'spatial', 'dual'}:
+                raise ValueError('Temporal attention compression requires spatial state slots')
+            from .video_mae import flat_sinusoid
+            self.register_buffer('compression_time_embed', flat_sinusoid(self.embed_dim, self.token_grid[0]), persistent=False)
+            self.compression_score = nn.Sequential(nn.LayerNorm(self.embed_dim),
+                nn.Linear(self.embed_dim, max(8,self.embed_dim//4)), nn.GELU(),
+                nn.Linear(max(8,self.embed_dim//4), 1))
+            # Start at uniform masked averaging; change compression only as it learns.
+            nn.init.zeros_(self.compression_score[-1].weight)
+            nn.init.zeros_(self.compression_score[-1].bias)
         self.frequency_conditioned = bool(cfg.get('frequency_conditioned', False))
         self.frequency_loss_weight = float(cfg.get('frequency_loss_weight', 0.))
+        if (self.frequency_conditioned or self.frequency_loss_weight) and (
+                self.memory_compression != 'mean' or self.memory_write_source != 'fused'):
+            raise ValueError('Stage-three mechanism candidates exclude frequency branches')
         if self.frequency_loss_weight < 0:
             raise ValueError('frequency_loss_weight must be nonnegative')
         if self.frequency_conditioned or self.frequency_loss_weight:
@@ -153,7 +173,16 @@ class TemporalMAE(EchoVideoMAE):
         dense = dense * weights[..., None]
         if self.memory_mode in {'global', 'none'}:
             return dense.sum(1, keepdim=True) / weights.sum(1)[:, None, None].clamp_min(1)
-        dense = dense.reshape(b, gt, gh, gw, dim).sum(1).permute(0, 3, 1, 2)
+        dense = dense.reshape(b, gt, gh, gw, dim)
+        if self.memory_compression == 'temporal_attention':
+            validity = weights.reshape(b, gt, gh, gw)
+            position = self.compression_time_embed.to(dense)[:, :, None, None, :]
+            scores = self.compression_score(dense + position).squeeze(-1).float()
+            scores = scores.masked_fill(validity == 0, -1e4)
+            # Counts retain baseline spatial weighting, including empty cells.
+            coefficients = scores.softmax(1) * validity.sum(1,keepdim=True)
+            dense = dense * coefficients.to(dense)[...,None]
+        dense = dense.sum(1).permute(0, 3, 1, 2)
         weights = weights.reshape(b, gt, gh, gw).sum(1)[:, None]
         size = (self.memory_grid, self.memory_grid)
         pooled = F.adaptive_avg_pool2d(dense, size) / F.adaptive_avg_pool2d(weights, size).clamp_min(1e-6)
@@ -205,6 +234,7 @@ class TemporalMAE(EchoVideoMAE):
                     b, self.token_grid, self.mask_ratio, self.research_mask,
                     video.device, i, spatial_order)
             encoded, _ = self.encode_video(clip, mask)
+            local_encoded = encoded
             if return_local:
                 if reconstruct:
                     raise ValueError('Local diagnostics require unmasked inference.')
@@ -227,7 +257,9 @@ class TemporalMAE(EchoVideoMAE):
                     read_gates.append(gate)
                 else:
                     encoded = fused
-            pooled = self._pool(encoded, mask, valid)
+            # Local-write isolates new evidence from the recurrent read feedback.
+            write_encoded = local_encoded if self.memory_write_source == 'local' else encoded
+            pooled = self._pool(write_encoded, mask, valid)
             if reconstruct:
                 pred = self._decode(encoded, mask, previous)
                 target = tubelet_patchify(self._normalize_input(clip), self.tubelet_size, self.patch_size)
