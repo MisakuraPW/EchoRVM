@@ -79,6 +79,13 @@ def main():
     p.add_argument('--with_seg',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--prefixes',nargs='+',type=int,default=[0,64,128])
     p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--eligible_budget',action='store_true')
+    p.add_argument('--ef_train_cases',type=int,default=256)
+    p.add_argument('--ef_val_cases',type=int,default=128)
+    p.add_argument('--seg_train_cases',type=int,default=32)
+    p.add_argument('--seg_val_cases',type=int,default=32)
+    p.add_argument('--ef_steps',type=int,default=200)
+    p.add_argument('--seg_steps',type=int,default=100)
     p.add_argument('--smoke',action='store_true')
     p.add_argument('--dry_run',action='store_true')
     args=p.parse_args()
@@ -107,6 +114,10 @@ def main():
             cmd.append('--no-with_seg')
         if args.smoke:
             cmd.append('--smoke')
+        if args.eligible_budget:
+            cmd.append('--eligible_budget')
+        for key in ('ef_train_cases','ef_val_cases','seg_train_cases','seg_val_cases','ef_steps','seg_steps'):
+            cmd.extend(['--'+key,str(getattr(args,key))])
         print(f'{name}: reuse {path}; MAE epochs=0; endpoint-only',flush=True)
         commands.append((name,cmd))
     if args.dry_run:
@@ -117,7 +128,9 @@ def main():
             raise FileNotFoundError(f'{path}; supply --checkpoint_root or --checkpoints_json; never substitute random weights')
     result.mkdir(parents=True,exist_ok=True)
     identity=dict(checkpoints={k:dict(path=v,sha256=file_hash(v)) for k,v in paths.items()},
-                  prefixes=args.prefixes,with_seg=args.with_seg,seed=args.seed,smoke=args.smoke)
+                  prefixes=args.prefixes,with_seg=args.with_seg,seed=args.seed,smoke=args.smoke,
+                  budget={k:getattr(args,k) for k in ('eligible_budget','ef_train_cases','ef_val_cases',
+                      'seg_train_cases','seg_val_cases','ef_steps','seg_steps')})
     guard=result/'queue_identity.json'
     if guard.exists() and json.loads(guard.read_text(encoding='utf-8'))!=identity:
         raise ValueError('Queue changed; choose a new run_tag')

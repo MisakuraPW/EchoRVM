@@ -39,7 +39,7 @@ def intervention_video(video, prefix, recent, kind, local_frames):
 
 
 @torch.no_grad()
-def stream_audit(model, video, recent, observe=False):
+def stream_audit(model, video, recent, observe=False, trajectory_callback=None):
     """Bounded FIFO of descriptors; optional per-clip compression/update traces."""
     length = model.local_frames
     if video.shape[1] < recent or video.shape[1] % length or recent % length:
@@ -67,6 +67,8 @@ def stream_audit(model, video, recent, observe=False):
             state, short = out['final_state'], out['final_short']
             local = model.frame_features(out['local_features']).mean(2)
             fused = model.frame_features(out['features']).mean(2)
+            if trajectory_callback is not None:
+                trajectory_callback(index, state, short, fused)
             fifo.append((local, fused))
             if state is not None:
                 compressed.append(captured['pooled'].mean(1))

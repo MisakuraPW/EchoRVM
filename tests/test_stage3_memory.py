@@ -1,3 +1,4 @@
+import csv
 import json
 import os
 from pathlib import Path
@@ -111,7 +112,12 @@ class Stage3Tests(unittest.TestCase):
             result=json.loads((out/'metrics.json').read_text())
             self.assertEqual(result['train_patients'],3)
             self.assertEqual(result['val_patients'],3)
-            self.assertEqual(len(result['ef']),9)
+            self.assertEqual(len(result['ef']),11)
+            with (out/'recovery_patient.csv').open(encoding='utf-8') as handle:
+                recovery=list(csv.DictReader(handle))
+            self.assertTrue(recovery)
+            self.assertTrue(all(float(r['state_distance_rms'])==0 for r in recovery
+                                if r['condition']=='zero_prefix_clip' and int(r['clip'])<3))
             self.assertIn('dice_patient_mean',result['seg'])
             with np.load(root/'cache'/'val.npz') as f:
                 self.assertEqual(len(json.loads(str(f['excluded'].item()))),1)
@@ -142,6 +148,17 @@ class Stage3Tests(unittest.TestCase):
             result=json.loads((root/'none_result'/'metrics.json').read_text())
             self.assertEqual(result['ef']['history_0_cache']['mae'],result['ef']['history_16_cache']['mae'])
             self.assertEqual(result['ef']['history_16_cache']['mae'],result['ef']['repeat_prefix_cache']['mae'])
+            eligible=cmd_none.copy()
+            eligible.remove('--smoke')
+            for flag,value in (('--output_dir',str(root/'eligible_result')),('--cache_dir',str(root/'eligible_cache'))):
+                eligible[eligible.index(flag)+1]=value
+            done=subprocess.run(eligible+['--no-with_seg','--eligible_budget','--ef_train_cases','3',
+                '--ef_val_cases','3','--ef_steps','2','--batch_size','2','--num_workers','0','--no-auto_workers'],
+                cwd=ROOT,env=env,capture_output=True,text=True,timeout=180)
+            self.assertEqual(done.returncode,0,done.stdout+done.stderr)
+            value=json.loads((root/'eligible_result'/'metrics.json').read_text())
+            self.assertEqual(value['train_patients'],3)
+            self.assertEqual(value['val_patients'],3)
 
     def test_queue_dry_run_selection_and_missing_checkpoint_fail_closed(self):
         cmd=[sys.executable,str(ROOT/'tools/run_stage3_memory.py'),'--only','hier_spatial','--dry_run']

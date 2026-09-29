@@ -29,7 +29,7 @@ from utils.stage2_diagnostics import paired_bootstrap
 from utils.stage3_diagnostics import conditions, intervention_video, stream_audit, gradient_audit
 from utils.seed import seed_everything
 
-VERSION = 'stage3_memory_v1'
+VERSION = 'stage3_memory_v2'
 
 
 def fit_head(train, key, args, device):
@@ -139,13 +139,14 @@ def extract_ef(model, dataset, args, device, split, cache, identity):
         with np.load(cache, allow_pickle=False) as f:
             if str(f['identity'].item()) != identity:
                 raise ValueError('Cached features mismatch; choose a new run_tag')
-            return {k:f[k].copy() for k in f.files if k not in {'identity','rows','excluded','traces'}}, {
-                k:json.loads(str(f[k].item())) for k in ('rows','excluded','traces')}
-    collected, rows, excluded, traces = {}, [], [], []
+            return {k:f[k].copy() for k in f.files if k not in {'identity','rows','excluded','traces','recovery'}}, {
+                k:json.loads(str(f[k].item())) for k in ('rows','excluded','traces','recovery')}
+    collected, rows, excluded, traces, recovery = {}, [], [], [], []
     specs = conditions(args.prefixes)
     if split == 'train':
         specs = [v for v in specs if v[2]=='clean']
     maximum = max(args.prefixes)
+    budget = getattr(args,'ef_'+split+'_cases')
     progress = tqdm(make_loader(dataset, args), desc='stage3 EF '+split)
     for batch in progress:
         keep = batch['frame_valid'].all(1)
@@ -155,6 +156,9 @@ def extract_ef(model, dataset, args, device, split, cache, identity):
                                      valid_frames=int(batch['frame_valid'][i].sum())))
         if not keep.any():
             continue
+        if args.eligible_budget:
+            positions = keep.nonzero().flatten()
+            keep[positions[max(0,budget-len(rows)):]] = False
         ids = [v for v,k in zip(batch['id'], keep) if k]
         video = batch['video'][keep].to(device, non_blocking=True)
         indices = batch['frame_indices'][keep]
@@ -162,10 +166,28 @@ def extract_ef(model, dataset, args, device, split, cache, identity):
             rows.append(dict(id=case, patient=case, source_start=int(indices[i,0]),
                 recent_start=int(indices[i,maximum]), source_end=int(indices[i,-1])))
         collected.setdefault('y', []).append(batch['target'][keep].numpy())
+        reference = []
         for name, prefix, kind in specs:
+            def trajectory(index, state, short, fused):
+                if name == f'history_{maximum}':
+                    reference.append((state, short, fused))
+                elif name in ('repeat_prefix','zero_prefix_clip'):
+                    rs, rh, rf = reference[index]
+                    values = dict(feature_distance_rms=(fused.float()-rf.float()).square().mean((1,2)).sqrt())
+                    if state is not None:
+                        distance=(state.float()-rs.float()).square().mean((1,2)).sqrt()
+                        values.update(state_distance_rms=distance,
+                            state_relative_distance=distance/rs.float().square().mean((1,2)).sqrt().clamp_min(1e-6))
+                    if short is not None:
+                        values['short_distance_rms']=(short.float()-rh.float()).square().mean((1,2)).sqrt()
+                    values={k:v.cpu().tolist() for k,v in values.items()}
+                    recovery.extend(dict(id=case,patient=case,condition=name,clip=index,
+                        clips_since_prefix=index-maximum//model.local_frames+1,
+                        **{k:v[i] for k,v in values.items()}) for i,case in enumerate(ids))
             with torch.autocast(device.type, enabled=device.type=='cuda'):
                 inp = intervention_video(video, prefix, args.recent_frames, kind, model.local_frames)
-                features, trace = stream_audit(model, inp, args.recent_frames, observe=split=='val')
+                features, trace = stream_audit(model, inp, args.recent_frames, observe=split=='val',
+                                               trajectory_callback=trajectory if split=='val' else None)
             # These traces are batch averages, not independent patient measurements.
             traces.extend(dict(condition=name, patients=ids, **row) for row in trace)
             names = ['cache']
@@ -180,10 +202,15 @@ def extract_ef(model, dataset, args, device, split, cache, identity):
                 collected.setdefault(name+'_'+feature, []).append(value.float().cpu().numpy().astype(np.float16))
         progress.set_postfix(eligible=len(rows),excluded=len(excluded),batch=args.batch_size,
                             memory=f'{torch.cuda.memory_allocated(device)/2**30:.1f}G' if device.type=='cuda' else 'cpu')
+        del reference
+        if args.eligible_budget and len(rows)>=budget:
+            break
+    if args.eligible_budget and len(rows)<budget:
+        raise ValueError(f'Eligible {split} patients {len(rows)} < requested {budget}; lower explicit budget or inspect data')
     if len(rows)<2:
         raise ValueError('Fewer than two complete-history patients; do not silently use repeated padding')
     arrays = {k:np.concatenate(v) for k,v in collected.items()}
-    metadata = dict(rows=rows, excluded=excluded, traces=traces)
+    metadata = dict(rows=rows, excluded=excluded, traces=traces, recovery=recovery)
     cache.parent.mkdir(parents=True, exist_ok=True)
     temp = cache.with_suffix('.tmp')
     with temp.open('wb') as f:
@@ -217,7 +244,8 @@ def evaluate(args):
     out, cache = Path(args.output_dir), Path(args.cache_dir)
     out.mkdir(parents=True, exist_ok=True)
     datasets = {split:TemporalEchoDataset(args.data_root, split, max(args.prefixes)+args.recent_frames,
-        channels=model.in_chans, input_protocol=args.input_protocol, limit=getattr(args, 'ef_'+split+'_cases'),
+        channels=model.in_chans, input_protocol=args.input_protocol,
+        limit=None if args.eligible_budget else getattr(args, 'ef_'+split+'_cases'),
         seed=args.seed, random_start=False) for split in ('train','val')}
     if set(datasets['train'].ids) & set(datasets['val'].ids):
         raise ValueError('Train/val patient overlap')
@@ -253,6 +281,7 @@ def evaluate(args):
         write_csv(out/('validity_'+split+'.csv'), metadata[split]['rows'])
         write_csv(out/('excluded_'+split+'.csv'), metadata[split]['excluded'])
     save_json(out/'state_traces.json', metadata['val']['traces'])
+    write_csv(out/'recovery_patient.csv',metadata['val']['recovery'])
     train, val = extracted['train'], extracted['val']
     maximum = max(args.prefixes)
     keys = [f'history_{p}_cache' for p in args.prefixes]
@@ -280,10 +309,24 @@ def evaluate(args):
                          error=float(abs(pred[i]-target[i]))) for i,r in enumerate(metadata['val']['rows'])]
             metrics[name], predictions[name] = value, rows
             write_csv(out/(name+'.csv'), rows)
+        if key == f'history_{maximum}_cache':
+            # Same fitted head, different history inputs: separate from the clean refit comparison.
+            for prefix in args.prefixes[:-1]:
+                name=f'fixed_head_history_{prefix}'
+                pred=predict(val[f'history_{prefix}_cache'])
+                target=torch.from_numpy(val['y'])
+                value=regression_metrics(pred,target)
+                value={k:float(v) if np.isfinite(v) else None for k,v in value.items()}
+                value.update(head_parameters=count,trained_on=key)
+                rows=[dict(r,target=float(target[i]),prediction=float(pred[i]),error=float(abs(pred[i]-target[i])))
+                      for i,r in enumerate(metadata['val']['rows'])]
+                metrics[name],predictions[name]=value,rows
+                write_csv(out/(name+'.csv'),rows)
         del predict
     contrasts = [(f'history_{p}_cache','history_0_cache') for p in args.prefixes if p]
     contrasts += [(k,f'history_{maximum}_cache') for k in ('repeat_prefix_cache','zero_prefix_clip_cache')]
     contrasts += [('degraded_history_cache','degraded_no_history_cache')]
+    contrasts += [(f'history_{maximum}_cache',f'fixed_head_history_{p}') for p in args.prefixes[:-1]]
     if model.memory_mode != 'none':
         contrasts += [(f'history_{maximum}_local_history',f'history_{maximum}_local_empty')]
     paired = [dict(candidate=a,control=b,**paired_bootstrap(predictions[a],predictions[b],'error',args.seed)) for a,b in contrasts]
@@ -369,6 +412,7 @@ def parse_args():
     p.add_argument('--auto_workers',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--with_seg',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--keep_cache',action='store_true')
+    p.add_argument('--eligible_budget',action='store_true',help='Scan the seeded split until the requested count of complete-history patients is met')
     p.add_argument('--smoke',action='store_true')
     args = p.parse_args()
     args.prefixes = sorted(set(args.prefixes))
