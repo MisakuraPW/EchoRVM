@@ -100,9 +100,11 @@ class AutotuneTests(unittest.TestCase):
 
         class FakeProcess:
             returncode = 0
+            measured_specs = []
 
             def __init__(self, command, **kwargs):
                 request = json.loads(Path(command[command.index('--trial') + 1]).read_text())
+                self.measured_specs.append((request['warm_updates'], request['measured_windows']))
                 selection = request['selection']
                 result = dict(selection, status='ok',
                               samples_per_second=selection['batch_size'] * 10,
@@ -115,8 +117,19 @@ class AutotuneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with patch('torch.cuda.is_available', return_value=True), \
                  patch('tools.tune_rmae_runtime.hardware', return_value={'gpu': 'fake'}):
+                old_folder = Path(directory) / 'autotune'
+                old_folder.mkdir()
+                (old_folder / 'old_trial.log').write_text('preserve')
+                (old_folder / 'runtime.json').write_text(json.dumps(dict(
+                    identity=dict(config=fingerprint(config()), hardware={'gpu': 'fake'}, version=1),
+                    selected=dict(batch_size=8, gradient_checkpointing=True, num_workers=8))))
                 with patch('tools.tune_rmae_runtime.subprocess.Popen', side_effect=FakeProcess):
                     first = calibrate(config(), directory)
+                self.assertTrue(list(Path(directory).glob('autotune_v1_preserved_*/old_trial.log')))
+                report = json.loads((Path(directory) / 'autotune' / 'runtime.json').read_text())
+                self.assertEqual(report['identity']['version'], 2)
+                self.assertTrue(FakeProcess.measured_specs)
+                self.assertEqual(set(FakeProcess.measured_specs), {(3, 8)})
                 self.assertEqual(first['train']['batch_size'], 32)
                 with patch('tools.tune_rmae_runtime.subprocess.Popen') as launch:
                     second = calibrate(config(), directory)

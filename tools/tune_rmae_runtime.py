@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import signal
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -30,15 +31,25 @@ def calibrate(config, run_dir):
     if config['train'].get('torch_compile', False):
         raise ValueError('Autotune does not support torch_compile; disable it explicitly before calibrating.')
     folder = Path(run_dir) / 'autotune'
-    folder.mkdir(parents=True, exist_ok=True)
-    identity = dict(config=fingerprint(config), hardware=hardware(), version=1)
+    identity = dict(config=fingerprint(config), hardware=hardware(), version=2,
+                    warm_updates=3, measured_windows=8)
     report_path = folder / 'runtime.json'
     if report_path.exists():
         report = json.loads(report_path.read_text())
-        if report['identity'] != identity:
+        if report.get('identity') == identity:
+            print('[autotune] reusing ' + str(report['selected']), flush=True)
+            return apply_selection(config, report['selected'])
+        if report.get('identity', {}).get('version') == 1:
+            # Keep prior measurements intact while allowing the corrected search
+            # to run in the same resumed output directory.
+            import datetime
+            stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+            preserved = folder.with_name(folder.name + '_v1_preserved_' + stamp)
+            shutil.move(str(folder), str(preserved))
+            print('[autotune] preserved old v1 measurements at ' + str(preserved), flush=True)
+        else:
             raise RuntimeError('Autotune cache/config/hardware changed. Preserve this report and use a new output directory.')
-        print('[autotune] reusing ' + str(report['selected']), flush=True)
-        return apply_selection(config, report['selected'])
+    folder.mkdir(parents=True, exist_ok=True)
     trials = []
     base = dict(batch_size=int(config['train']['batch_size']),
                 gradient_checkpointing=bool(config['model'].get('gradient_checkpointing', False)),
@@ -51,7 +62,8 @@ def calibrate(config, run_dir):
         index = len(trials)
         request = folder / f'trial_{index:02d}.json'
         result = folder / f'trial_{index:02d}_result.json'
-        request.write_text(json.dumps(dict(config=config, selection=selection)), encoding='utf-8')
+        request.write_text(json.dumps(dict(config=config, selection=selection,
+                                           warm_updates=3, measured_windows=8)), encoding='utf-8')
         print('[autotune] probe ' + str(selection), flush=True)
         with (folder / f'trial_{index:02d}.log').open('w', encoding='utf-8') as log:
             try:
@@ -86,18 +98,31 @@ def calibrate(config, run_dir):
         row = attempt(dict(base, batch_size=b))
         if row['status'] != 'ok' and b > base['batch_size']:
             break
-    best = choose_trial(trials)
-    selected = {k: best[k] for k in base}
-    attempt(dict(selected, gradient_checkpointing=not selected['gradient_checkpointing']))
-    best = choose_trial(trials)
-    selected = {k: best[k] for k in base}
+    # Compare checkpointing jointly with worker counts for the two fastest
+    # safe microbatches. Worker count affects input overlap, while checkpointing
+    # changes GPU compute and memory; tuning them independently can miss the
+    # best combination.
+    finalist_batches = []
+    for row in sorted((r for r in trials if r.get('status') == 'ok'),
+                      key=lambda r: r['samples_per_second'], reverse=True):
+        if row['batch_size'] not in finalist_batches:
+            finalist_batches.append(row['batch_size'])
+        if len(finalist_batches) == 2:
+            break
+    if not finalist_batches:
+        raise RuntimeError('No safe batch/checkpointing candidate; inspect autotune/trials.')
     try:
         cpus = len(os.sched_getaffinity(0))
     except AttributeError:
         cpus = os.cpu_count() or 1
-    for workers in sorted({0, min(cpus, max(1, base['num_workers'] // 2)),
-                           min(cpus, 16, max(2, base['num_workers'] * 2))}):
-        attempt(dict(selected, num_workers=workers))
+    worker_candidates = sorted({0, min(cpus, base['num_workers']),
+                                min(cpus, max(1, base['num_workers'] // 2))})
+    for batch in finalist_batches:
+        for checkpointing in (False, True):
+            for workers in worker_candidates:
+                attempt(dict(base, batch_size=batch,
+                             gradient_checkpointing=checkpointing,
+                             num_workers=workers))
     best = choose_trial(trials)
     selected = {k: best[k] for k in base}
     report = dict(identity=identity, selected=selected, trials=trials,
@@ -138,8 +163,10 @@ def probe(request):
     torch.cuda.reset_peak_memory_stats()
     # Real forward/backward/optimizer steps allocate lazy optimizer state.
     # Warmup is excluded, and each timed window ends with CUDA synchronization.
-    for window in range(12):
-        measuring = warm_updates >= 2
+    warm_target = int(request.get('warm_updates', 3))
+    measured_target = int(request.get('measured_windows', 8))
+    for window in range(warm_target + measured_target + 8):
+        measuring = warm_updates >= warm_target
         torch.cuda.synchronize()
         begin = time.perf_counter()
         n, data_seconds = 0, 0.
@@ -180,7 +207,7 @@ def probe(request):
             wait_time += data_seconds
             updates += int(successful)
             measured_windows += 1
-            if measured_windows == 3:
+            if measured_windows == measured_target:
                 break
         else:
             warm_updates += int(successful)
@@ -190,10 +217,11 @@ def probe(request):
     # Account for memory held by the parent/other processes, not just our tensors.
     external = max(0, total - free - torch.cuda.memory_reserved())
     limit = min(total * .85, total - 2 * 1024**3)
-    status = 'ok' if reserved + external <= limit and updates == 3 else 'unsafe'
+    status = 'ok' if reserved + external <= limit and updates == measured_target else 'unsafe'
     return dict(selection, status=status, samples_per_second=samples / max(elapsed, 1e-9),
                 data_wait_fraction=wait_time / max(elapsed, 1e-9), peak_allocated_bytes=allocated,
-                peak_reserved_bytes=reserved, external_bytes=external, successful_updates=updates)
+                peak_reserved_bytes=reserved, external_bytes=external, successful_updates=updates,
+                warm_updates=warm_target, measured_windows=measured_windows)
 
 
 def main():
