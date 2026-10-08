@@ -67,7 +67,7 @@ def fit_head(train, key, args, device):
     return predict, losses, sum(p.numel() for p in head.parameters())
 
 
-def tune_runtime(model, dataset, args, device, seg_sample=None):
+def tune_runtime(model, dataset, args, device, seg_sample=None, benchmark_fn=None):
     """Tune execution knobs only, without looking at any task labels/scores."""
     rows = []
     if args.batch_size == 0:
@@ -83,7 +83,10 @@ def tune_runtime(model, dataset, args, device, seg_sample=None):
                     def trial():
                         video = sample[None].expand(size,-1,-1,-1,-1).to(device)
                         with torch.autocast('cuda'):
-                            stream_audit(model, video, args.recent_frames)
+                            if benchmark_fn is None:
+                                stream_audit(model, video, args.recent_frames)
+                            else:
+                                benchmark_fn(video)
                             if seg_sample is not None:
                                 frames=seg_sample['video'][None].expand(size,-1,-1,-1,-1).to(device)
                                 valid=seg_sample['frame_valid'][None].expand(size,-1).to(device)

@@ -31,6 +31,7 @@ docs/*
 !docs/stage1_lengths.md
 !docs/stage2_research_plan.md
 !docs/stage2_questions_runbook.md
+!docs/dynamic_refinement.md
 !docs/AGENTS.md
 docs/~$*.xlsx
 资料/

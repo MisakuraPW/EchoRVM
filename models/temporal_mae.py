@@ -106,13 +106,23 @@ class TemporalMAE(EchoVideoMAE):
             self.frequency_gates = FrequencyMemoryGates(self.embed_dim)
         self.frame_readout = str(cfg.get('frame_readout', 'repeat'))
         self.patch_init_temporal_sum = bool(cfg.get('patch_init_temporal_sum', False))
-        if self.frame_readout not in {'repeat', 'learned'}:
-            raise ValueError('frame_readout must be repeat or learned')
-        if self.frame_readout == 'learned':
+        if self.frame_readout not in {'repeat', 'learned', 'factorized', 'query'}:
+            raise ValueError('Unknown frame_readout')
+        self.dynamic_orthogonal_weight = float(cfg.get('dynamic_orthogonal_weight', 0.))
+        if self.dynamic_orthogonal_weight < 0 or (self.dynamic_orthogonal_weight and self.frame_readout != 'factorized'):
+            raise ValueError('Orthogonal regularization requires factorized frame readout')
+        if self.frame_readout != 'repeat':
             if self.tubelet_size != 2 or self.norm_pix_loss or self.frequency_loss_weight:
                 raise ValueError('Learned frame expansion requires tubelet2, raw targets, no frequency loss')
-            from .frame_readout import FrameExpansion
-            self.frame_expansion = FrameExpansion(self.embed_dim, self.tubelet_size)
+            from .frame_readout import FrameExpansion, FactorizedFrameExpansion, FrameQueryExpansion
+            if self.frame_readout == 'factorized':
+                self.frame_expansion = FactorizedFrameExpansion(self.embed_dim, self.tubelet_size,
+                                                               int(cfg.get('dynamic_rank', 16)))
+            elif self.frame_readout == 'query':
+                self.frame_expansion = FrameQueryExpansion(self.embed_dim, self.tubelet_size,
+                                                          int(cfg.get('num_heads', 6)))
+            else:
+                self.frame_expansion = FrameExpansion(self.embed_dim, self.tubelet_size)
             self.decoder_pred = nn.Linear(self.decoder_pred.in_features,
                                           self.patch_size**2 * self.in_chans)
             nn.init.xavier_uniform_(self.decoder_pred.weight)
@@ -125,20 +135,28 @@ class TemporalMAE(EchoVideoMAE):
                    get_3d_sincos_pos_embed(dim, self.local_frames, gh, gw))
             self.register_buffer('frame_decoder_pos_embed', pos, persistent=False)
 
-    def frame_features(self, features):
+    def frame_features(self, features, valid=None):
         """[B,tubelets,patches,D] -> [B,frames,patches,D], shared with MAE."""
-        if self.frame_readout == 'learned':
-            return self.frame_expansion(features)
+        if self.frame_readout != 'repeat':
+            groups = self.token_grid[0]
+            if features.shape[1] > groups:
+                if features.shape[1] % groups:
+                    raise ValueError('Frame expansion requires complete local clips')
+                chunks = features.split(groups, dim=1)
+                masks = [None] * len(chunks) if valid is None else valid.split(groups, dim=1)
+                return torch.cat([self.frame_expansion(x, m) for x, m in zip(chunks, masks)], 1)
+            return self.frame_expansion(features, valid)
         return features.repeat_interleave(self.tubelet_size, dim=1)
 
     def _decode(self, encoded, mask, previous):
         b = encoded.shape[0]
-        if self.frame_readout == 'learned':
+        if self.frame_readout != 'repeat':
             # Expand only visible encoder tokens. Hidden pixels have no shortcut.
             gt, gh, gw = self.token_grid
             dense = encoded.new_zeros(b, gt * gh * gw, self.embed_dim)
             dense[~mask] = encoded.reshape(-1, self.embed_dim)
-            expanded = self.frame_features(dense.reshape(b, gt, gh * gw, -1)).flatten(1, 2)
+            expanded = self.frame_features(dense.reshape(b, gt, gh * gw, -1),
+                                          (~mask).reshape(b, gt, gh * gw)).flatten(1, 2)
             frame_mask = mask.reshape(b, gt, gh * gw).repeat_interleave(self.tubelet_size, 1).flatten(1)
             decoded = self.decoder_embed(expanded[~frame_mask].reshape(b, -1, self.embed_dim))
             full = self.mask_token.to(decoded).expand(b, frame_mask.shape[1], -1).clone()
@@ -154,7 +172,7 @@ class TemporalMAE(EchoVideoMAE):
             full = self.memory_fusion(full, self.memory_to_decoder(previous).to(full))
         full = self.run_blocks(full, self.decoder_blocks)
         pred = self.decoder_pred(self.decoder_norm(full))
-        if self.frame_readout == 'learned':
+        if self.frame_readout != 'repeat':
             # Restore original tubelet_patchify order: (time, spatial, offset, pixels).
             pred = pred.reshape(b, gt, self.tubelet_size, gh * gw, -1)
             pred = pred.permute(0, 1, 3, 2, 4).reshape(b, gt * gh * gw, -1)
@@ -302,8 +320,12 @@ class TemporalMAE(EchoVideoMAE):
                 raise ValueError('No valid masked tubelets: video is too short for this configuration.')
             pixel_loss = loss_sum / weight_sum
             frequency_loss = frequency_sum / weight_sum
-            loss = pixel_loss + self.frequency_loss_weight * frequency_loss
+            orthogonal = (self.frame_expansion.orthogonal_loss() if self.frame_readout == 'factorized'
+                          else pixel_loss.new_zeros(()))
+            loss = pixel_loss + self.frequency_loss_weight * frequency_loss + self.dynamic_orthogonal_weight * orthogonal
             result.update(loss=loss, loss_recon=pixel_loss.detach(),
+                          loss_dynamic_orthogonal=orthogonal.detach(),
+                          loss_dynamic_orthogonal_weighted=(self.dynamic_orthogonal_weight * orthogonal).detach(),
                           loss_frequency=frequency_loss.detach(),
                           loss_frequency_weighted=(self.frequency_loss_weight * frequency_loss).detach(),
                           pred=torch.cat(predictions, 1),

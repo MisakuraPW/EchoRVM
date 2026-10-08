@@ -267,6 +267,7 @@ def run_epoch(
     loss_meter = AverageMeter()
     component_meters = {key: AverageMeter() for key in (
         'loss_recon', 'loss_align', 'loss_frequency', 'loss_frequency_weighted',
+        'loss_dynamic_orthogonal', 'loss_dynamic_orthogonal_weighted',
         'frequency_read_gate', 'frequency_write_gate')}
     data_meter = AverageMeter()
     step_meter = AverageMeter()
@@ -600,6 +601,7 @@ def main() -> int:
                 "time": datetime.now().isoformat(timespec="seconds"),
             }
             for key in ('loss_recon', 'loss_align', 'loss_frequency', 'loss_frequency_weighted',
+                        'loss_dynamic_orthogonal', 'loss_dynamic_orthogonal_weighted',
                         'frequency_read_gate', 'frequency_write_gate'):
                 row['train_' + key] = train_metrics[key]
                 row['val_' + key] = val_metrics[key] if val_metrics else None
@@ -615,6 +617,7 @@ def main() -> int:
                 tb_writer.add_scalar("Runtime/data_time", train_metrics["data_time"], epoch)
                 tb_writer.add_scalar("Runtime/step_time", train_metrics["step_time"], epoch)
                 for key in ('loss_recon', 'loss_frequency', 'loss_frequency_weighted',
+                            'loss_dynamic_orthogonal', 'loss_dynamic_orthogonal_weighted',
                             'frequency_read_gate', 'frequency_write_gate'):
                     tb_writer.add_scalar('Components/train_' + key, train_metrics[key], epoch)
             metric_value = val_metrics["loss"] if val_metrics else train_metrics["loss"]

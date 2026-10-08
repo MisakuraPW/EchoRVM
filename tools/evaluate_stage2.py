@@ -80,13 +80,13 @@ def seg_batch(model, video, valid, targets, context):
         video = video * valid[:, :, None, None, None]
     result = model.diagnostic_features(video, valid)
     native = result['features']
-    expanded = model.frame_features(native)
     good, partial = tubelet_weights(valid, model.tubelet_size)
+    expanded = model.frame_features(native, good[:, :, None].expand(-1, -1, native.shape[2]))
     expanded = expanded * good.repeat_interleave(model.tubelet_size, 1)[:, :, None, None]
     chosen = expanded[torch.arange(len(video), device=video.device), targets]
     gh, gw = model.token_grid[1:]
     maps = dict(fused=chosen.transpose(1, 2).reshape(len(video), model.embed_dim, gh, gw))
-    if model.frame_readout == 'learned':
+    if model.frame_readout != 'repeat':
         base = native[torch.arange(len(video), device=video.device), targets//model.tubelet_size]
         maps['native'] = base.transpose(1, 2).reshape_as(maps['fused'])
     return maps, dict(complete=good.sum(1), partial=partial.sum(1))
