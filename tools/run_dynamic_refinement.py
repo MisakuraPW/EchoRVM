@@ -65,6 +65,18 @@ def checkpoints(args):
     return {n:paths[n] for n in args.controls}
 
 
+def run_endpoint(command, stage, result, times, output_dir, required_files):
+    output_dir = Path(output_dir)
+    done = output_dir / 'DONE'
+    if done.is_file():
+        missing = [name for name in required_files if not (output_dir / name).is_file()]
+        if missing:
+            raise RuntimeError(f'{stage} has DONE but is missing required outputs: {missing}')
+        print(f'\n========== {stage}: reuse completed outputs ==========', flush=True)
+        return
+    run_command(command, stage, result, times)
+
+
 @contextmanager
 def queue_lock(path):
     """Kernel-owned lock is released on exit/crash; stale text cannot block recovery."""
@@ -258,7 +270,8 @@ def main():
                    '--manifest',str(manifest_file),'--seed',str(args.seed),'--num_workers',str(args.num_workers)]
             if args.smoke:
                 cmd += ['--batch_size','1','--no-auto_workers','--plot_cases','1','--nuisance_cases','1']
-            run_command(cmd,name+'/medical',result,times)
+            run_endpoint(cmd,name+'/medical',result,times,out/'medical',
+                         ('metrics.json','patient_metrics.csv','summary.csv'))
             if args.endpoint:
                 ef = [sys.executable,'tools/evaluate_stage3.py','--checkpoint',str(checkpoint),
                       '--output_dir',str(out/'ef'),'--cache_dir',str(run/'cache'/name/'ef'),
@@ -267,7 +280,7 @@ def main():
                       '--seed',str(args.seed),'--num_workers',str(args.num_workers)]
                 if args.smoke:
                     ef.append('--smoke')
-                run_command(ef,name+'/ef_endpoint',result,times)
+                run_endpoint(ef,name+'/ef_endpoint',result,times,out/'ef',('metrics.json',))
                 seg = [sys.executable,'tools/audit_stage3_streaming.py','--checkpoint',str(checkpoint),
                        '--output_dir',str(out/'positions'),'--cache_dir',str(run/'cache'/name/'positions'),
                        '--data_root',args.data_root,'--train_all_positions','--stream_cases','1' if args.smoke else '2',
@@ -276,7 +289,8 @@ def main():
                 if args.smoke:
                     seg += ['--seg_train_cases','2','--seg_val_cases','2','--seg_steps','2',
                             '--batch_size','1','--no-auto_workers']
-                run_command(seg,name+'/position_stream_endpoint',result,times)
+                run_endpoint(seg,name+'/position_stream_endpoint',result,times,out/'positions',
+                             ('seg_position_summary.csv','stream_checks.json'))
             summarize(result,names,args.seed)
         (result/'DONE').write_text('Bounded dynamic refinement queue completed\n')
         save_json(result/'current_stage.json',dict(stage='all_completed',status='completed'))

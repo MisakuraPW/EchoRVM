@@ -7,6 +7,7 @@ import sys
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -20,7 +21,7 @@ from utils.dynamic_latent import (fit_motion_axis, motion_signal, detect_events,
 from utils.dynamic_data import build_dynamic_manifest
 from utils.streaming_features import StreamingFeatureCache
 from tools.evaluate_dynamic_latent import evaluate
-from tools.run_dynamic_refinement import configuration, queue_lock
+from tools.run_dynamic_refinement import configuration, queue_lock, run_endpoint
 
 
 def tiny_config(readout, image_size=16):
@@ -67,6 +68,18 @@ class DynamicTests(unittest.TestCase):
                     torch.testing.assert_close(value,candidate.state_dict()[key])
             for key,value in anchor.frame_expansion.state_dict().items():
                 torch.testing.assert_close(value,candidate.frame_expansion.base.state_dict()[key])
+
+    def test_completed_endpoints_are_reused_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output=Path(temp)/'endpoint';output.mkdir()
+            (output/'DONE').write_text('complete')
+            (output/'metrics.json').write_text('{}')
+            times=[]
+            with patch('tools.run_dynamic_refinement.run_command') as launch:
+                run_endpoint(['python','evaluate.py'],'baseline/ef',Path(temp),times,output,('metrics.json',))
+                launch.assert_not_called()
+            with self.assertRaisesRegex(RuntimeError,'missing required outputs'):
+                run_endpoint(['python','evaluate.py'],'broken',Path(temp),times,output,('predictions.csv',))
 
     def test_masked_pixels_never_leak_amp_gradients_roundtrip_and_stream(self):
         for readout in ('learned','factorized','query'):
