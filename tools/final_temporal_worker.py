@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import multiprocessing
 from pathlib import Path
 import sys
 
@@ -11,13 +12,20 @@ sys.path.insert(0, str(ROOT))
 import torch
 
 
+def configure_worker_runtime():
+    # Forking after Torch/CUDA work can inherit locked thread pools. Configure
+    # spawn before datasets create shared epoch counters or loaders start.
+    multiprocessing.set_start_method('spawn', force=True)
+    torch.set_num_threads(4)
+
+
 def main():
+    configure_worker_runtime()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--job', required=True)
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     args = parser.parse_args()
-    torch.set_num_threads(4)
     job = json.loads(Path(args.job).read_text(encoding='utf-8'))
     manifest = json.loads(Path(args.manifest).read_text(encoding='utf-8'))
     if job['kind'] == 'preflight':
