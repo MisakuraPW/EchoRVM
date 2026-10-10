@@ -59,7 +59,10 @@ def load_pretrained_rmae(
         if isinstance(saved_cfg, dict) and isinstance(saved_cfg.get("model"), dict):
             cfg = dict(saved_cfg["model"])
     model_name = str(cfg.get("name", "echo_rmae")).lower()
-    if model_name == 'temporal_mae':
+    if model_name == 'temporal_final':
+        from .final_temporal_mae import FinalTemporalMAE
+        model = FinalTemporalMAE(**cfg)
+    elif model_name == 'temporal_mae':
         model = TemporalMAE(**cfg)
     elif model_name in {"echo_single_frame_mae", "single_frame_mae", "videomae_single_frame"}:
         model = build_echo_single_frame_mae(cfg)
@@ -168,6 +171,9 @@ class EchoVideoMAEBackbone(nn.Module):
         expected = int(self.rmae.frames)
         if video.shape[2] == 1 and self.rmae.in_chans == 3:
             video = video.expand(-1, -1, 3, -1, -1)
+        if hasattr(self.rmae, 'memory_read_location'):
+            tokens = self.rmae.diagnostic_features(video)['frame_outputs']
+            return {"encoded": tokens, "outputs": tokens, "states": tokens}
         if isinstance(self.rmae, TemporalMAE) and video.shape[1] != expected:
             raise ValueError(f'Temporal fine-tuning requires real {expected}-frame context, not repeated frames.')
         if video.shape[1] != expected:

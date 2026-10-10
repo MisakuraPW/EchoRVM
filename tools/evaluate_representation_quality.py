@@ -76,7 +76,10 @@ def load_model(path: str, device: torch.device) -> tuple[nn.Module, dict[str, An
     cfg = ckpt.get("config", {}) if isinstance(ckpt, dict) else {}
     model_cfg = dict(cfg.get("model", {})) if isinstance(cfg, dict) else {}
     name = str(model_cfg.get("name", "echo_rmae")).lower()
-    if name == 'temporal_mae':
+    if name == 'temporal_final':
+        from models.final_temporal_mae import FinalTemporalMAE
+        model = FinalTemporalMAE(**model_cfg)
+    elif name == 'temporal_mae':
         model = TemporalMAE(**model_cfg)
     elif name in {"echocardmae_video", "echo_card_mae_video"}:
         model = build_echocardmae_video(model_cfg)
@@ -136,7 +139,7 @@ def to_video(batch: dict[str, Any], device: torch.device) -> torch.Tensor:
 
 def adapt_video_for_model(video: torch.Tensor, model: nn.Module) -> torch.Tensor:
     expected = int(getattr(model, "frames", video.shape[1]))
-    if hasattr(model, "frame_mae"):
+    if hasattr(model, "frame_mae") or hasattr(model, 'memory_read_location'):
         return video
     if video.shape[1] == expected:
         return video

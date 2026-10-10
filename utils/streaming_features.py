@@ -39,12 +39,14 @@ class StreamingFeatureCache:
         out = self.model.stream_clip(video, self.state, self.short_state)
         self.patient_ids = ids
         self.state, self.short_state = out['final_state'], out['final_short']
-        self.entries.append(dict(local=self.model.frame_features(out['local_features']).mean(2).detach(),
-            fused=self.model.frame_features(out['features']).mean(2).detach(),
+        local = out['local_frame_outputs'] if 'local_frame_outputs' in out else self.model.frame_features(out['local_features'])
+        fused = out['frame_outputs'] if 'frame_outputs' in out else self.model.frame_features(out['features'])
+        self.entries.append(dict(local=local.mean(2).detach(),
+            fused=fused.mean(2).detach(),
             before=previous, indices=indices.detach().clone()))
         self.next_index = indices[:, -1] + 1
         self.observed_clips += 1
-        return dict(frame_features=self.model.frame_features(out['features']),
+        return dict(frame_features=fused,
                     frame_indices=indices, **self.read())
 
     def read(self):
