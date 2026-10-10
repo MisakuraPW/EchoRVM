@@ -130,8 +130,32 @@ class FinalTemporalDataTests(unittest.TestCase):
         trace.to_csv(tracefile, index=False)
         frame.loc[frame.FileName == 'exact', 'FrameWidth'] = 224
         frame.to_csv(path, index=False)
-        with self.assertRaisesRegex(ValueError, 'GT coordinate mismatch'):
-            build_manifest(self.root)
+        manifest = build_manifest(self.root)
+        exact = next(case for case in manifest['train'] if case['patient'] == 'exact')
+        self.assertEqual(exact['shape'], [64,112,112])
+        self.assertEqual(exact['declared_spatial_shape'], [112.,224.])
+        self.assertTrue(exact['dimension_metadata_mismatch'])
+        self.assertEqual(manifest['counts']['train']['dimension_metadata_mismatches'],1)
+
+    def test_metadata_dimensions_do_not_rescale_actual_112_gt_or_drop_unlabelled_video(self):
+        path = self.root / 'FileList.csv'
+        frame = pd.read_csv(path)
+        frame.loc[frame.FileName.isin(['long','exact']), ['FrameHeight','FrameWidth']] = [768,1024]
+        frame.to_csv(path,index=False)
+        manifest = build_manifest(self.root)
+        long = next(case for case in manifest['train'] if case['patient']=='long')
+        self.assertEqual(long['traces'],next(case for case in self.manifest['train'] if case['patient']=='long')['traces'])
+        self.assertEqual(long['shape'],[256,112,112])
+        before = WindowDataset(self.manifest,'train',task='seg',positions='all')
+        after = WindowDataset(manifest,'train',task='seg',positions='all')
+        self.assertEqual(len(before),len(after))
+        for index in range(len(after)):
+            torch.testing.assert_close(before[index]['mask'],after[index]['mask'])
+        traces = pd.read_csv(self.root/'VolumeTracings.csv')
+        traces = traces[traces.FileName != 'exact.avi']
+        traces.to_csv(self.root/'VolumeTracings.csv',index=False)
+        unlabelled = build_manifest(self.root)
+        self.assertTrue(any(case['patient']=='exact' and not case['traces'] for case in unlabelled['train']))
 
     def test_official_out_of_canvas_vertices_are_clipped_not_changed(self):
         tracefile = self.root / 'VolumeTracings.csv'

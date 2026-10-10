@@ -24,6 +24,8 @@ RUN_TAG=temporal_final_20261010 bash scripts/run_temporal_final.sh
 
 这里正式tag不变的前提是原来的`&&`已因冒烟失败而没有启动正式队列。如果正式tag已写入旧代码协议，也必须另取新tag；不要删除协议文件或绕过核验。
 
+数据尺寸核验使用实际AVI/NPY像素形状，不把`FileList.csv`里的`FrameHeight/FrameWidth`直接当发布文件或GT坐标尺寸。服务器已核对TRAIN中5例声明768x1024/1040但实际AVI/NPY均112x112、没有分割描迹的记录；这些病例正常保留到MAE/EF人群。清单记录`declared_spatial_shape`、`dimension_metadata_mismatch`及split汇总计数，实际非112x112的文件仍拒绝，GT不因CSV声明尺寸缩放。
+
 默认数据根：`/root/autodl-tmp/datasets/EchoNet-Dynamic`。沿用灰度NPY缓存，采样后在内存复制三通道，不创建RGB数据盘。需要 `FileList.csv`、`VolumeTracings.csv` 与对应视频/NPY；TEST不读取。缺真实数据或权重直接报错，不回退synthetic/random。
 
 默认权重：

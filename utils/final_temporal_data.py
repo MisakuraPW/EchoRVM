@@ -128,6 +128,7 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
         rows.sort(key=lambda row: _hash([int(seed), split, row['_patient']]))
         reasons = Counter()
         warmup = 0
+        dimension_metadata_mismatches = 0
         for row in rows:
             patient = row['_patient']
             if smoke and len(result[split]) >= 8:
@@ -145,9 +146,8 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
                 result['excluded'].append(dict(split=split, patient=patient, reason=reason))
                 continue
             provenance = _file_provenance(path)
-            for column in ('FrameHeight', 'FrameWidth'):
-                if pd.notna(row.get(column)) and float(row[column]) != 112:
-                    raise ValueError(f'{patient}: original {column} is not 112; GT coordinate mismatch')
+            declared_shape = [float(row[column]) if pd.notna(row.get(column)) else None
+                              for column in ('FrameHeight', 'FrameWidth')]
             if path.suffix.lower() == '.npy':
                 raw = np.load(path, mmap_mode='r', allow_pickle=False)
             else:
@@ -169,6 +169,9 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
             case = dict(patient=patient, frames=n, fps=float(row['FPS']),
                         ef=float(row['EF']) if np.isfinite(float(row['EF'])) else None,
                         traces=labels[patient], shape=shape, dtype=dtype, **provenance)
+            case['declared_spatial_shape'] = declared_shape
+            case['dimension_metadata_mismatch'] = any(value is not None and value != 112 for value in declared_shape)
+            dimension_metadata_mismatches += int(case['dimension_metadata_mismatch'])
             case['source_fingerprint'] = _hash(provenance)
             case['declared_frames'] = (int(row['NumberOfFrames'])
                                        if pd.notna(row.get('NumberOfFrames')) else None)
@@ -183,6 +186,7 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
                     result['excluded'].append(dict(split=split, patient=patient, task='seg',
                                                    frame=trace['frame'], reason='seg_not_complete_all_positions'))
         counts[split] = dict(filelist_cases=len(rows), eligible_cases=len(result[split]),
+                             dimension_metadata_mismatches=dimension_metadata_mismatches,
                              short_recent_cases=reasons['short_recent'],
                              warmup_excluded_traces=warmup, exclusion_counts=dict(reasons))
     result['counts'] = counts
@@ -192,6 +196,7 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
     result['provenance'] = dict(**metadata,
                                 source_hash_policy='SHA256 metadata contents; video stat/shape/dtype only',
                                 input_protocol='gray_repeat3', gt_shape=[112, 112],
+                                dimension_policy='Actual pixel shape must be 112x112; CSV dimensions are recorded, never used to rescale GT',
                                 rasterizer='utils.downstream_datasets._rasterize_echonet_trace')
     result['manifest_sha256'] = _hash(result)
     return result
