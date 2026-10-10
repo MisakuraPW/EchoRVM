@@ -23,9 +23,10 @@ from utils.final_temporal_training import file_digest, write_json, digest
 
 def verify_upgrade(previous, current, expected):
     changed = {key for key in previous['code'] if previous['code'][key] != current.get(key)}
-    allowed = {'utils/final_temporal_tasks.py', 'utils/final_temporal_training.py'}
+    allowed = {'utils/final_temporal_tasks.py', 'utils/final_temporal_training.py',
+               'tools/final_temporal_worker.py'}
     if changed != allowed or set(previous['code']) != set(current):
-        raise ValueError('Follow-up patch must change exactly tasks and adaptation telemetry, not models/data/selection')
+        raise ValueError('Follow-up patch must change exactly task execution, telemetry and worker limits, not models/data/selection')
     for key in changed:
         if current[key] != expected[key]:
             raise ValueError('Deployed implementation differs from the verified commit')
@@ -95,7 +96,8 @@ def main():
         subprocess.run(['git', 'merge', '--ff-only', fetched], cwd=ROOT, check=True)
         expected = {key: __import__('hashlib').sha256(subprocess.check_output(
             ['git', 'show', fetched + ':' + key], cwd=ROOT)).hexdigest()
-            for key in ('utils/final_temporal_tasks.py', 'utils/final_temporal_training.py')}
+            for key in ('utils/final_temporal_tasks.py', 'utils/final_temporal_training.py',
+                        'tools/final_temporal_worker.py')}
         updated = verify_upgrade(previous, scientific_code(), expected)
         write_json(status, dict(state='verifying_followup', guardian_pid=os.getpid(), commit=fetched))
         # This covers real spawn lifetime/epoch augmentation as well as CUDA head tuning.
@@ -109,7 +111,7 @@ def main():
         write_json(ops / 'followup_audit_upgrade.json', dict(commit=fetched,
             previous_protocol_sha256=digest(previous), upgraded_protocol_sha256=digest(updated),
             changed_files=sorted(expected), preserved_completed_jobs=completed,
-            changes='persistent loaders, bounded cold-feature retry, additive position/P10 and training coverage telemetry',
+            changes='persistent loaders, bounded cold-feature retry, additive telemetry and inherited nofile limit',
             scientific_settings_unchanged=True, old_tasks_not_retrained=True,
             server_regression_passed=True, server_test_log=str(ops / 'followup_server_tests.log')))
         write_json(root / 'protocol.json', updated)

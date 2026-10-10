@@ -3,6 +3,7 @@
 import argparse
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import sys
 
@@ -12,10 +13,18 @@ sys.path.insert(0, str(ROOT))
 import torch
 
 
+def raise_worker_file_limit():
+    if os.name == 'posix':
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, min(hard, 65536)), hard))
+
+
 def configure_worker_runtime():
     # Forking after Torch/CUDA work can inherit locked thread pools. Configure
     # spawn before datasets create shared epoch counters or loaders start.
     multiprocessing.set_start_method('spawn', force=True)
+    raise_worker_file_limit()
     torch.set_num_threads(4)
 
 

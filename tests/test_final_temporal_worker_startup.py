@@ -2,6 +2,7 @@ import argparse
 import json
 import sys
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -10,6 +11,17 @@ from tools import final_temporal_worker as worker
 
 
 class WorkerStartupTests(unittest.TestCase):
+    def test_file_limit_is_raised_within_hard_limit_and_never_lowered(self):
+        for soft, hard, expected in ((1024, 1048576, 65536), (1024, 4096, 4096),
+                                     (131072, 1048576, 131072)):
+            calls = []
+            resource = SimpleNamespace(RLIMIT_NOFILE=7, getrlimit=lambda _: (soft, hard),
+                                       setrlimit=lambda limit, values: calls.append((limit, values)))
+            with mock.patch.object(worker.os, 'name', 'posix'), \
+                 mock.patch.dict(sys.modules, resource=resource):
+                worker.raise_worker_file_limit()
+            self.assertEqual(calls, [(7, (expected, hard))])
+
     def test_spawn_is_configured_before_torch_threads(self):
         calls = []
         with mock.patch.object(worker.multiprocessing, 'set_start_method',
