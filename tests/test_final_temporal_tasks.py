@@ -270,6 +270,10 @@ class FinalTemporalTaskTests(unittest.TestCase):
         metrics, patients = tasks._aggregate(rows, 'seg')
         self.assertEqual(patients[0]['dice'], .5)
         self.assertEqual(metrics['patient_dice'], .75)
+        self.assertAlmostEqual(metrics['patient_dice_p10'], .55)
+        self.assertAlmostEqual(metrics['position_patient_dice']['0'], .75)
+        self.assertEqual(metrics['position_patient_dice']['1'], 0.)
+        self.assertAlmostEqual(metrics['position_patient_dice_range'], .75)
         with self.assertRaisesRegex(ValueError, 'positions'):
             tasks._aggregate(rows, 'seg', range(4))
         with self.assertRaisesRegex(ValueError, 'complete-context'):
@@ -278,6 +282,80 @@ class FinalTemporalTaskTests(unittest.TestCase):
               dict(patient='a', source_frame=-1, position=-1, full_context=True, prediction=50., target=40.),
               dict(patient='b', source_frame=-1, position=-1, full_context=True, prediction=50., target=50.)]
         self.assertEqual(tasks._aggregate(ef, 'ef')[0]['mae_pp'], 5.)
+
+    def test_cold_frozen_extraction_splits_oom_without_changing_samples(self):
+        cache = tasks._FeatureCache(self.root/'cold_cache', 'cold', disk_bytes=0, ram_bytes=10000)
+        samples = [dict(video=torch.tensor([float(i)]), cache_key=str(i), patient=str(i)) for i in range(5)]
+        calls = []
+        def extract(backbone, batch, job, device):
+            calls.append(len(batch))
+            self.assertFalse(torch.is_grad_enabled())
+            if len(batch) > 2:
+                raise torch.cuda.OutOfMemoryError('cold encoder batch too large')
+            return torch.stack([row['video'].repeat(3) for row in batch]), 0
+        with mock.patch.object(tasks, '_extract', side_effect=extract):
+            values, slots = tasks._features(None, samples, dict(freeze=True), torch.device('cpu'), cache)
+        torch.testing.assert_close(values, torch.arange(5.).view(-1, 1).expand(-1, 3), rtol=0, atol=0)
+        self.assertEqual(slots, 0)
+        self.assertEqual(calls, [5, 2, 2, 1])
+        self.assertEqual(cache.extraction_oom_retries, 1)
+        self.assertEqual(cache.misses, 0)
+        for index in range(5):
+            torch.testing.assert_close(cache.get(str(index))['features'], values[index])
+        with mock.patch.object(tasks, '_extract', side_effect=AssertionError('already extracted')):
+            replay, _ = tasks._features(None, samples, dict(freeze=True), torch.device('cpu'), cache)
+        torch.testing.assert_close(replay, values, rtol=0, atol=0)
+
+    def test_cold_single_sample_oom_is_not_hidden(self):
+        with mock.patch.object(tasks, '_extract', side_effect=torch.cuda.OutOfMemoryError('single window')):
+            with self.assertRaisesRegex(torch.cuda.OutOfMemoryError, 'single window'):
+                tasks._features(None, [dict(video=torch.zeros(1))], dict(freeze=True), torch.device('cpu'))
+
+    def test_task_loaders_are_reused_across_epochs(self):
+        original = tasks._loader
+        calls = []
+        def observe(inputs, *args, **kwargs):
+            calls.append((inputs.split, kwargs.get('training', False), args))
+            return original(inputs, *args, **kwargs)
+        with mock.patch.object(tasks, '_loader', side_effect=observe):
+            result = tasks.run_task_job(self.job('reuse_readers', task='seg', freeze=False, epochs=2),
+                                        self.manifest, 'cpu')
+        # One normalization loader, one persistent training loader and one VAL loader.
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sum(split == 'val' for split, _, _ in calls), 1)
+        self.assertEqual(result['epochs_completed'], 2)
+
+    def test_persistent_spawn_readers_keep_epoch_positions_and_augmentation_exact(self):
+        from tools.final_temporal_worker import configure_worker_runtime
+        configure_worker_runtime()
+        source = WindowDataset(self.manifest, 'train', task='seg', recent_frames=8, local_frames=4,
+                               max_prefix=8, prefix=0, training=True,
+                               aug_cfg=dict(enabled=True, preset='A4_tgc_zoom_speckle', per_frame_random=False))
+        inputs = tasks._Inputs(source)
+        loader = tasks._loader(inputs, 2, 3, 42, training=True, workers=2)
+        loader.timeout = 45
+        worker_pids = None
+        try:
+            for epoch in range(2):
+                source.set_epoch(epoch)
+                loader.batch_sampler.epoch = epoch
+                loader.batch_sampler.start = 0
+                actual = [sample for batch in loader for sample in batch]
+                expected = [sample for batch in tasks._loader(inputs, 2, 3, 42, epoch=epoch,
+                                                             training=True, workers=0) for sample in batch]
+                pids = [worker.pid for worker in loader._iterator._workers]
+                if worker_pids is not None:
+                    self.assertEqual(pids, worker_pids)
+                worker_pids = pids
+                self.assertEqual(len(actual), len(expected))
+                for a, b in zip(actual, expected):
+                    self.assertEqual(a['target_index'], b['target_index'])
+                    self.assertEqual(a['cache_key'], b['cache_key'])
+                    torch.testing.assert_close(a['video'], b['video'], rtol=0, atol=0)
+                    torch.testing.assert_close(a['mask'], b['mask'], rtol=0, atol=0)
+        finally:
+            if loader._iterator is not None:
+                loader._iterator._shutdown_workers()
 
     def test_microbatch_effective_update_ragged_and_resume_permutation(self):
         ds = WindowDataset(self.manifest, 'train', task='seg', recent_frames=8, local_frames=4,

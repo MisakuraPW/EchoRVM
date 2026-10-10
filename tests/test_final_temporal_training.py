@@ -51,6 +51,11 @@ class WarmTrainingTests(unittest.TestCase):
                 torch.testing.assert_close(astate[key], bstate[key], rtol=0, atol=0)
             self.assertEqual(a['prefix_sample_counts'], b['prefix_sample_counts'])
             self.assertEqual(sum(b['prefix_sample_counts'].values()), 9)
+            self.assertEqual(a['training_coverage'], b['training_coverage'])
+            self.assertEqual(b['training_coverage']['samples'], 9)
+            self.assertEqual(b['training_coverage']['recent_reconstruction_frames'], 9 * 8)
+            self.assertEqual(b['training_coverage']['prefix_frames'],
+                             sum(int(h) * count for h, count in b['prefix_sample_counts'].items()))
             rows = [json.loads(row) for row in (root/'interrupted/result/logs/train_metrics.jsonl').read_text().splitlines()]
             self.assertEqual([row['step'] for row in rows], [1,2,3])
             self.assertIn('weighted_orthogonal_loss', rows[-1])

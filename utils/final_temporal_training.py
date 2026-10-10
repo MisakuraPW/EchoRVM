@@ -267,6 +267,8 @@ def run_warm_job(job, manifest, device):
     scaler = scaler_for(device)
     cursor = 0
     history, update_times, prior_wall = {}, [], 0.
+    coverage = dict(samples=0, observed_frames=0, prefix_frames=0,
+                    recent_reconstruction_frames=0, prefix_seconds=0., observed_seconds=0.)
     if last.exists():
         saved = torch.load(last, map_location='cpu', weights_only=False)
         if saved['protocol'] != protocol:
@@ -277,6 +279,7 @@ def run_warm_job(job, manifest, device):
         history = saved.get('prefix_counts', {})
         update_times = saved.get('update_times', [])
         prior_wall = float(saved.get('wall_seconds', 0))
+        coverage.update(saved.get('training_coverage', {}))
         logger.info('resumed successful_update=%d', cursor)
     config['model'].update(gradient_checkpointing=model.gradient_checkpointing)
     config['data'] = dict(input_protocol='gray_repeat3', sampling_protocol='final_variable_prefix_v2')
@@ -314,6 +317,7 @@ def run_warm_job(job, manifest, device):
                               scaler_state_dict=scaler.state_dict(), rng_state=get_rng_state(), config=config,
                               cursor=cursor, global_step=cursor, epoch=0, protocol=protocol,
                               prefix_counts=history, update_times=update_times,
+                              training_coverage=coverage,
                               wall_seconds=prior_wall + time.perf_counter() - start), last,
                           min_free_gb=float(job.get('min_free_gb', 5)))
     try:
@@ -359,8 +363,14 @@ def run_warm_job(job, manifest, device):
                     raise FloatingPointError('Repeated AMP overflows; no successful update')
             cursor += 1
             for batch in batches:
-                for h in batch['prefix_frames'].tolist():
+                for h, fps in zip(batch['prefix_frames'].tolist(), batch['fps'].tolist()):
                     history[str(h)] = history.get(str(h), 0) + 1
+                    coverage['samples'] += 1
+                    coverage['prefix_frames'] += h
+                    coverage['observed_frames'] += h + dataset.recent_frames
+                    coverage['recent_reconstruction_frames'] += dataset.recent_frames
+                    coverage['prefix_seconds'] += h / fps
+                    coverage['observed_seconds'] += (h + dataset.recent_frames) / fps
             if device.type == 'cuda':
                 torch.cuda.synchronize()
             elapsed = time.perf_counter() - begin; update_times.append(elapsed)
@@ -383,6 +393,8 @@ def run_warm_job(job, manifest, device):
         atomic_torch_save(dict(model_state_dict=model.state_dict(), config=config, epoch=0, global_step=cursor,
                               final_adaptation=True, protocol=protocol), weights / 'final.pt', float(job.get('min_free_gb', 5)))
         final = dict(successful_updates=cursor, effective_batch=effective, prefix_sample_counts=history,
+                     training_coverage=dict(coverage,
+                         duration_convention='frame count / source FPS, summed over successful draws; not unique video duration'),
                      runtime=runtime, wall_seconds=prior_wall + time.perf_counter() - start,
                      optimizer_update_seconds_median=float(np.median(update_times)) if update_times else None,
                      max_training_prefix=job.get('max_prefix', 128), memory_slots=model.memory_slots,

@@ -90,6 +90,7 @@ class _FeatureCache:
         self.root.mkdir(parents=True, exist_ok=True)
         self.ram, self.ram_used = OrderedDict(), 0
         self.hits = self.misses = self.writes = self.skipped_low_space = 0
+        self.extraction_oom_retries = 0
         self._prune()
 
     def _path(self, key):
@@ -398,20 +399,43 @@ def _extract(backbone, samples, job, device):
     return torch.stack(result), int(slots or 0)
 
 
+def _frozen_chunk(backbone, samples, job, device):
+    try:
+        with torch.no_grad(), torch.autocast(device.type, enabled=False):
+            values, slots = _extract(backbone, samples, job, device)
+        return values.detach().cpu(), slots
+    except torch.cuda.OutOfMemoryError:
+        if len(samples) == 1:
+            raise
+    # Leave the exception frame before the caller releases CUDA cached storage.
+    return None
+
+
 def _features(backbone, samples, job, device, cache=None):
     if not job['freeze']:
         return _extract(backbone, samples, job, device)
     missing = [i for i, sample in enumerate(samples) if 'features' not in sample]
-    if missing:
-        with torch.no_grad(), torch.autocast(device.type, enabled=False):
-            values, slots = _extract(backbone, [samples[i] for i in missing], job, device)
-        for row, index in enumerate(missing):
+    offset, chunk_size = 0, len(missing)
+    while offset < len(missing):
+        indices = missing[offset:offset + chunk_size]
+        extracted = _frozen_chunk(backbone, [samples[i] for i in indices], job, device)
+        if extracted is None:
+            if cache:
+                cache.extraction_oom_retries += 1
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            chunk_size = max(1, len(indices) // 2)
+            continue
+        values, slots = extracted
+        for row, index in enumerate(indices):
             sample = {k: v for k, v in samples[index].items()
                       if k not in ('video', 'frame_indices', 'update_cursor', 'update_size', 'update_last')}
             sample.update(features=values[row].detach().cpu(), history_slots=slots)
             if cache:
                 cache.put(sample['cache_key'], sample)
             samples[index].update(features=sample['features'], history_slots=slots)
+        offset += len(indices)
     slots = {int(sample['history_slots']) for sample in samples}
     if len(slots) != 1:
         raise ValueError('Inconsistent cached boundary slots')
@@ -723,17 +747,29 @@ def _aggregate(rows, task, expected_positions=None):
         metrics = dict(mae_pp=float(np.abs(errors).mean()), rmse_pp=float(np.sqrt((errors ** 2).mean())))
     else:
         metrics = dict(patient_dice=float(np.mean([r['dice'] for r in result])))
+        metrics['patient_dice_p10'] = float(np.quantile([r['dice'] for r in result], .1))
+        position_sources = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+        for row in rows:
+            position_sources[row['position']][row['patient']][row['source_frame']].append(row['dice'])
+        positions = {str(position): float(np.mean([
+            np.mean([np.mean(values) for values in sources.values()])
+            for sources in patients.values()])) for position, patients in sorted(position_sources.items())}
+        metrics.update(position_patient_dice=positions,
+                       position_patient_dice_mean=float(np.mean(list(positions.values()))),
+                       position_patient_dice_range=float(max(positions.values()) - min(positions.values())))
     metrics.update(patients=len(result), source_frames=len(sources), windows=len(rows),
                    full_context_windows=len(rows), full_context_sources=len(sources))
     return metrics, result
 
 
-def _evaluate(model, inputs, job, normalization, device, cache, micro):
+def _evaluate(model, inputs, job, normalization, device, cache, micro, loader=None):
     model.eval()
     rows, loss_sum, count = [], 0.0, 0
     started = time.perf_counter()
     with torch.no_grad():
-        for samples in _loader(inputs, micro, job['effective_batch'], job['seed'], workers=job['num_workers']):
+        batches = loader if loader is not None else _loader(
+            inputs, micro, job['effective_batch'], job['seed'], workers=job['num_workers'])
+        for samples in batches:
             with _amp(job, device):
                 values, slots = _features(model.backbone, samples, job, device, inputs.cache)
                 prediction = model.read(values, slots)
@@ -1048,8 +1084,13 @@ def run_task_job(job, manifest, device):
         workers, worker_report = _tune_workers(train_inputs, job, micro)
     tune_report = dict(tune_report, worker_tuning=worker_report)
     job['num_workers'] = workers
+    # Persistent TRAIN and VAL readers coexist; divide the RAM budget over both.
+    reader_processes = 2 * workers + 1
+    if cache:
+        cache.set_ram_budget(job['ram_cache_bytes'] // reader_processes)
     protocol['runtime'].update(workers=workers, requested_workers=requested_workers,
-                               ram_cache_bytes_per_process=job['ram_cache_bytes'] // (workers + 1))
+                               persistent_reader_processes=reader_processes,
+                               ram_cache_bytes_per_process=job['ram_cache_bytes'] // reader_processes)
     protocol.update(micro_batch=micro, active_parameters=active, autotune=tune_report,
                     normalization_sha256=_digest(normalization), cache_identity=cache_identity)
     # The early guard excludes fields learned once from calibration/resume.
@@ -1088,7 +1129,7 @@ def run_task_job(job, manifest, device):
     (output / 'DONE').unlink(missing_ok=True)
     writer = _tensorboard(output, job)
     bar = None
-    loader = iterator = None
+    loader = val_loader = iterator = None
 
     def save_last():
         atomic_torch_save(dict(version=2, identity=identity, model_state_dict=_task_state(model, active),
@@ -1107,8 +1148,13 @@ def run_task_job(job, manifest, device):
             train.set_epoch(epoch)
             _train_mode(model, job)
             optimizer.zero_grad(set_to_none=True)
-            loader = _loader(train_inputs, micro, job['effective_batch'], seed, epoch,
-                             progress['next_update'], True, job['num_workers'])
+            if loader is None:
+                loader = _loader(train_inputs, micro, job['effective_batch'], seed, epoch,
+                                 progress['next_update'], True, job['num_workers'])
+            else:
+                loader.batch_sampler.epoch = epoch
+                loader.batch_sampler.start = progress['next_update']
+                loader.generator.manual_seed(seed + epoch)
             iterator = iter(loader)
             pending_loss = pending_count = 0
             pending_monitor = 0.0
@@ -1187,12 +1233,14 @@ def run_task_job(job, manifest, device):
                 update_started = time.perf_counter()
             bar.close()
             bar = None
-            # Retire persistent readers before validation or a new epoch starts.
-            iterator = loader = None
-            gc.collect()
+            iterator = None
             if not progress['train_samples']:
                 raise RuntimeError('Epoch had no successful optimizer updates')
-            validation, patients = _evaluate(model, val_inputs, job, normalization, device, cache, micro)
+            if val_loader is None:
+                val_loader = _loader(val_inputs, micro, job['effective_batch'], seed,
+                                     workers=job['num_workers'])
+            validation, patients = _evaluate(model, val_inputs, job, normalization, device, cache, micro,
+                                             loader=val_loader)
             metric = validation['mae_pp'] if job['task'] == 'ef' else validation['patient_dice']
             improved = (progress['best_metric'] is None or
                         (metric < progress['best_metric'] if job['task'] == 'ef' else metric > progress['best_metric']))
@@ -1243,7 +1291,11 @@ def run_task_job(job, manifest, device):
              f'{"saved optimizer boundary" if safe else "kept previous durable checkpoint"}')
         raise
     finally:
-        iterator = loader = None
+        for reader in (loader, val_loader):
+            active_reader = getattr(reader, '_iterator', None)
+            if active_reader is not None:
+                active_reader._shutdown_workers()
+        iterator = loader = val_loader = reader = active_reader = None
         gc.collect()
         if writer:
             writer.close()
@@ -1275,7 +1327,8 @@ def run_task_job(job, manifest, device):
                    cache=dict(identity=cache_identity, disk_budget_bytes=job['disk_cache_bytes'],
                               ram_budget_bytes=job['ram_cache_bytes'], hits=cache.hits if cache else 0,
                               misses=cache.misses if cache else 0, writes=cache.writes if cache else 0,
-                              skipped_low_space=cache.skipped_low_space if cache else 0))
+                              skipped_low_space=cache.skipped_low_space if cache else 0,
+                              extraction_oom_retries=cache.extraction_oom_retries if cache else 0))
     metrics.update(dict(mae=metrics['mae_pp']) if job['task'] == 'ef'
                    else dict(dice_patient_mean=metrics['patient_dice']))
     _json(output / 'metrics.json', metrics)
