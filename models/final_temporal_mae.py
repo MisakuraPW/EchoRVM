@@ -51,8 +51,8 @@ class FinalTemporalMAE(TemporalMAE):
         cfg = dict(config)
         if cfg.get('frequency_conditioned') or cfg.get('frequency_loss_weight', 0):
             raise ValueError('Final temporal study excludes frequency branches')
-        mode = str(cfg.get('memory_mode', 'spatial'))
-        readout = str(cfg.get('frame_readout', 'learned'))
+        mode = str(cfg.get('memory_mode', 'global'))
+        readout = str(cfg.get('frame_readout', 'repeat'))
         if mode not in {'global', 'spatial', 'spatial_global', 'none'}:
             raise ValueError('Final study excludes dual memory')
         if readout not in {'repeat', 'learned', 'factorized', 'shrink', 'soft_factorized'}:
@@ -305,6 +305,10 @@ def checkpoint_payload(path):
             state = {key[len(prefix):]:tensor for key,tensor in state.items()}
     if any(not isinstance(tensor, torch.Tensor) for tensor in state.values()):
         raise ValueError('Source state dictionary contains non-tensor entries')
+    # Old saved configs omit these fields and rely on TemporalMAE defaults.
+    # Resolve those same defaults, never substitute a different frame module.
+    config['model'].setdefault('frame_readout', 'repeat')
+    config['model'].setdefault('memory_mode', 'global')
     return value, config, state
 
 

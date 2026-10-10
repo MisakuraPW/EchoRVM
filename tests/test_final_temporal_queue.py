@@ -4,8 +4,11 @@ from types import SimpleNamespace
 import tempfile
 import unittest
 from unittest import mock
+import torch
 
-from tools.run_temporal_final import Queue
+from tools.run_temporal_final import Queue, validate_sources
+from models.temporal_mae import TemporalMAE
+from test_final_temporal_model import tiny_config
 
 
 class QueueContractTests(unittest.TestCase):
@@ -52,6 +55,25 @@ class QueueContractTests(unittest.TestCase):
             self.assertFalse(child.exists())
             with self.assertRaises(ValueError):
                 queue.cleanup_cache(dict(cache_dir=str(queue.result)))
+
+    def test_source_defaults_are_resolved_and_bad_tensors_fail_before_preflight(self):
+        with tempfile.TemporaryDirectory() as folder:
+            sources = {}
+            for name, frame in (('P','repeat'),('C','learned'),('F','factorized')):
+                cfg = tiny_config(frame_readout=frame,dynamic_rank=4)
+                if name == 'P':
+                    cfg.pop('frame_readout')
+                path = Path(folder)/(name+'.pt')
+                torch.save(dict(model_state_dict=TemporalMAE(**cfg).state_dict(),config=dict(model=cfg),epoch=100),path)
+                sources[name] = path
+            contracts = validate_sources(sources,smoke=True)
+            self.assertEqual(contracts['P']['model']['frame_readout'],'repeat')
+            self.assertTrue(all(value['source_tensor_contract_verified'] for value in contracts.values()))
+            value = torch.load(sources['P'],weights_only=False)
+            value['model_state_dict']['decoder_pred.weight'] = value['model_state_dict']['decoder_pred.weight'][:1]
+            torch.save(value,sources['P'])
+            with self.assertRaisesRegex(ValueError,'mismatch'):
+                validate_sources(sources,smoke=True)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ import gc
 import torch
 
 from models.final_temporal_mae import FinalTemporalMAE
+from models.temporal_mae import TemporalMAE
 from test_final_temporal_tasks import _fixture, _config
 
 
@@ -24,9 +25,11 @@ class FinalPipelineTests(unittest.TestCase):
                          '--cache_disk_gb','0.01', '--cache_ram_gb','0.01']
             for name, frame in (('P','repeat'), ('C','learned'), ('F','factorized')):
                 cfg = dict(_config(), frame_readout=frame, dynamic_rank=4, memory_compression='temporal_attention')
+                if name == 'P':
+                    cfg.pop('frame_readout')
                 torch.manual_seed(42)
                 path = root/(name+'.pt')
-                torch.save(dict(model_state_dict=FinalTemporalMAE(**cfg).state_dict(),
+                torch.save(dict(model_state_dict=TemporalMAE(**cfg).state_dict(),
                                 config=dict(model=cfg), epoch=100), path)
                 arguments.extend(['--checkpoint',name+'='+str(path)])
             from tools import run_temporal_final as queue

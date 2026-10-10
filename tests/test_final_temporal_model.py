@@ -112,6 +112,35 @@ class FinalTemporalModelTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 backbone.forward_tokens(torch.rand(1, 1, 1, 16, 16))
 
+    def test_legacy_omitted_readout_and_memory_defaults_load_exactly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for default_memory in (False, True):
+                cfg = tiny_config()
+                cfg.pop('frame_readout')
+                if default_memory:
+                    cfg.pop('memory_mode')
+                    cfg['memory_compression'] = 'mean'
+                old = TemporalMAE(**cfg).eval()
+                self.assertEqual(old.frame_readout, 'repeat')
+                direct = FinalTemporalMAE(**cfg).eval()
+                direct.load_state_dict(old.state_dict(), strict=True)
+                path = Path(directory) / ('legacy_default_' + str(default_memory) + '.pt')
+                torch.save(dict(model_state_dict=old.state_dict(),config=dict(model=cfg),epoch=100),path)
+                restored, saved_config, report = load_final_model(path)
+                restored.eval()
+                self.assertEqual(restored.frame_readout, 'repeat')
+                self.assertEqual(restored.memory_mode, old.memory_mode)
+                self.assertEqual(saved_config['model']['frame_readout'], 'repeat')
+                self.assertEqual(report['initialized_keys'], [])
+                self.assertEqual(report['discarded_keys'], [])
+                self.assertFalse(any(key.startswith('frame_expansion.') for key in restored.state_dict()))
+                video = torch.rand(1,8,3,16,16)
+                mask = torch.zeros(1,2,32,dtype=torch.bool); mask[:,:,::2]=True
+                with torch.no_grad():
+                    torch.testing.assert_close(old(video,masks=mask)['pred'], restored(video,masks=mask)['pred'],rtol=1e-5,atol=1e-6)
+                    torch.testing.assert_close(old.frame_features(old.diagnostic_features(video)['features']),
+                        restored.diagnostic_features(video)['frame_outputs'],rtol=1e-5,atol=1e-6)
+
 
 if __name__ == '__main__':
     unittest.main()

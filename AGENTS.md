@@ -1,5 +1,6 @@
 # Project delivery workflow
 
+- Use a single agent for this project by default. Do not spawn subagents or introduce multi-agent implementation/review unless the user explicitly requests it.
 - The user has authorized automatic commits and pushes for completed code changes in this project. After implementing and verifying a code change, commit the task-scoped files and push the current branch to its configured upstream without requiring another reminder.
 - Inspect the working tree and index first. Preserve unrelated edits and staged work; never include them implicitly in a task commit.
 - Do not commit credentials, datasets, model checkpoints, generated outputs, or unrelated research records as part of code delivery.

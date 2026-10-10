@@ -67,7 +67,7 @@ def smoke_manifest(manifest):
 
 
 def validate_sources(sources, smoke=False):
-    from models.final_temporal_mae import checkpoint_payload
+    from models.final_temporal_mae import checkpoint_payload, load_final_model
     records = {}
     for name, path in sources.items():
         if not Path(path).is_file():
@@ -84,8 +84,14 @@ def validate_sources(sources, smoke=False):
         expected = dict(P='repeat', C='learned', F='factorized')[name]
         if model.get('frame_readout', 'repeat') != expected or model.get('memory_mode') != 'spatial':
             raise ValueError(f'{name}: source role/readout mismatch; names alone do not certify source identity')
+        # Validate the actual tensor contract before any timing/training worker.
+        verified, _, report = load_final_model(path)
+        if report['initialized_keys']:
+            raise ValueError(f'{name}: calibration source must load every tensor without fresh modules')
+        del verified
         records[name] = dict(path=str(Path(path).resolve()), sha256=file_digest(path),
-                             epoch=payload.get('epoch'), model=model, tensor_count=len(state))
+                             epoch=payload.get('epoch'), model=model, tensor_count=len(state),
+                             source_tensor_contract_verified=True)
     keys = ('img_size','patch_size','local_frames','tubelet_size','in_chans','embed_dim','depth','num_heads',
             'memory_grid','core_depth','memory_compression','position_embedding')
     canonical = {key:records['C']['model'].get(key) for key in keys}

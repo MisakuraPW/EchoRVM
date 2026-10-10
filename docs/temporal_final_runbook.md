@@ -14,6 +14,16 @@ RUN_TAG=temporal_final_20261010 bash scripts/run_temporal_final.sh
 
 两条脚本默认使用同一真实EchoNet数据路径和已有P/C/F100权重。冒烟使用独立run tag、每split两名真实有效患者、两次适配更新及一轮任务训练，并强制走B7/B8实现分支；不会作为科研结果。正式运行先进行训练集测速、登记预算，再运行任务；不是先看验证分数再调整资源/学习率。
 
+2026-10-10旧P权重兼容修正：旧配置省略`frame_readout`时按原`TemporalMAE`的`repeat`处理，而不是新建learned展开；源P/C/F的全部tensor在预热前核验，不允许跳过decoder或随机补帧模块。修复前已经失败的冒烟目录有旧源码协议，保留它但换新的冒烟tag运行：
+
+```bash
+git pull --ff-only
+RUN_TAG=temporal_final_smoke_legacyfix_20261010 bash scripts/run_temporal_final_smoke.sh && \
+RUN_TAG=temporal_final_20261010 bash scripts/run_temporal_final.sh
+```
+
+这里正式tag不变的前提是原来的`&&`已因冒烟失败而没有启动正式队列。如果正式tag已写入旧代码协议，也必须另取新tag；不要删除协议文件或绕过核验。
+
 默认数据根：`/root/autodl-tmp/datasets/EchoNet-Dynamic`。沿用灰度NPY缓存，采样后在内存复制三通道，不创建RGB数据盘。需要 `FileList.csv`、`VolumeTracings.csv` 与对应视频/NPY；TEST不读取。缺真实数据或权重直接报错，不回退synthetic/random。
 
 默认权重：
