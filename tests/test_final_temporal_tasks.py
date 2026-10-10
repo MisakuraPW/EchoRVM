@@ -183,11 +183,47 @@ class FinalTemporalTaskTests(unittest.TestCase):
                 protocol = json.loads((Path(job['output_dir']) / 'protocol.json').read_text())
                 self.assertEqual(protocol['train_samples'], 6)
                 self.assertEqual(protocol['head']['name'], 'ViTPatchSegDecoder')
-                self.assertEqual(protocol['validation_cache'], 'none_streaming')
+                self.assertEqual(protocol['validation_cache'], 'bounded_frozen_features' if freeze else 'none_streaming')
                 if freeze:
                     shards = list((Path(job['cache_dir']) / protocol['cache_identity']).glob('*.pt'))
-                    self.assertEqual(len(shards), 6)
-                    self.assertTrue(all(_load(path)['sample']['patient'].startswith('train_') for path in shards))
+                    self.assertEqual(len(shards), 22)
+                    self.assertTrue(any(_load(path)['sample']['patient'].startswith('val_') for path in shards))
+
+    def test_frozen_validation_cache_preserves_predictions_loss_and_training(self):
+        metrics = []
+        states = []
+        for enabled in (False,True):
+            job = self.job('val_cache_' + str(enabled),task='seg',freeze=True,epochs=2,
+                           cache_dir=str(self.root/('cache_' + str(enabled))),cache_frozen_validation=enabled)
+            metrics.append(tasks.run_task_job(job,self.manifest,'cpu'))
+            states.append(_load(Path(job['checkpoint_dir'])/'last.pt'))
+        self.assertEqual(metrics[0]['val_loss'],metrics[1]['val_loss'])
+        self.assertEqual(metrics[0]['patient_dice'],metrics[1]['patient_dice'])
+        self.assertEqual(states[0]['progress']['best_predictions'],states[1]['progress']['best_predictions'])
+        for name,value in states[0]['model_state_dict'].items():
+            torch.testing.assert_close(value,states[1]['model_state_dict'][name],rtol=0,atol=0)
+        job = self.job('val_cache_True',task='seg',freeze=True,epochs=2,
+                       cache_dir=str(self.root/'cache_True'),cache_frozen_validation=True)
+        # Completed fits also verify every existing artifact instead of re-training.
+        with mock.patch.object(tasks,'encode_window',side_effect=AssertionError('Unexpected encoder call')):
+            self.assertEqual(tasks.run_task_job(job,self.manifest,'cpu')['patient_dice'],metrics[1]['patient_dice'])
+
+    def test_feature_cache_does_not_scan_all_shards_for_every_write(self):
+        cache = tasks._FeatureCache(self.root/'cache_count','id',disk_bytes=10000000,ram_bytes=0)
+        with mock.patch.object(cache,'_prune',wraps=cache._prune) as scan:
+            for index in range(20):
+                cache.put(str(index),dict(features=torch.zeros(8,24),patient='p'))
+            self.assertEqual(scan.call_count,0)
+        self.assertEqual(cache.disk_used,sum(path.stat().st_size for path in cache.root.glob('*.pt')))
+
+    def test_cache_disk_reserve_falls_back_without_losing_ram_features(self):
+        cache=tasks._FeatureCache(self.root/'low_space','id',disk_bytes=10000000,ram_bytes=10000000,reserve_bytes=1000000)
+        sample=dict(features=torch.zeros(8,24),patient='p')
+        with mock.patch.object(tasks.shutil,'disk_usage',return_value=mock.Mock(free=0)):
+            cache.put('key',sample)
+        self.assertEqual(cache.writes,0)
+        self.assertEqual(cache.skipped_low_space,1)
+        torch.testing.assert_close(cache.get('key')['features'],sample['features'])
 
     def test_approved_defaults_are_by_adaptation_mode_not_task(self):
         formal = mock.Mock(img_size=112, local_frames=16)

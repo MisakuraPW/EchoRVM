@@ -18,6 +18,7 @@ import json
 import math
 from pathlib import Path
 import platform
+import shutil
 import time
 import warnings
 
@@ -79,15 +80,16 @@ def _log(path, message):
 class _FeatureCache:
     """Bounded, disposable LRU shards; a namespace never trusts another run."""
 
-    def __init__(self, root, identity, disk_bytes=8 * 1024 ** 3, ram_bytes=128 * 1024 ** 2):
+    def __init__(self, root, identity, disk_bytes=8 * 1024 ** 3, ram_bytes=128 * 1024 ** 2, reserve_bytes=0):
         self.root = Path(root) / identity
         self.identity = identity
         self.disk_bytes, self.ram_bytes = int(disk_bytes), int(ram_bytes)
-        if min(self.disk_bytes, self.ram_bytes) < 0:
+        self.reserve_bytes = int(reserve_bytes)
+        if min(self.disk_bytes, self.ram_bytes, self.reserve_bytes) < 0:
             raise ValueError('Cache budgets must be nonnegative')
         self.root.mkdir(parents=True, exist_ok=True)
         self.ram, self.ram_used = OrderedDict(), 0
-        self.hits = self.misses = self.writes = 0
+        self.hits = self.misses = self.writes = self.skipped_low_space = 0
         self._prune()
 
     def _path(self, key):
@@ -147,10 +149,17 @@ class _FeatureCache:
                   for k, v in sample.items()}
         self._remember(key, sample)
         if self.disk_bytes and tensor_payload_bytes(sample) <= self.disk_bytes:
+            required = int(tensor_payload_bytes(sample) * 1.2) + 8 * 1024**2 + self.reserve_bytes
+            if shutil.disk_usage(self.root).free < required:
+                self.skipped_low_space += 1
+                return
             path = self._path(key)
+            previous = path.stat().st_size if path.exists() else 0
             atomic_torch_save(dict(identity=self.identity, key=key, sample=sample), path)
             self.writes += 1
-            self._prune()
+            self.disk_used += path.stat().st_size - previous
+            if self.disk_used > self.disk_bytes:
+                self._prune()
 
     def _prune(self):
         files = []
@@ -166,6 +175,7 @@ class _FeatureCache:
                 break
             path.unlink(missing_ok=True)
             total -= size
+        self.disk_used = total
 
 
 class _Inputs(Dataset):
@@ -798,7 +808,7 @@ def _resolve_job(job, backbone):
                     head_dim=64 if task == 'ef' else 192, head_depth=4, head_heads=3,
                     precision='fp16', tune_reserve_bytes=512 * 1024 ** 2,
                     tune_reserve_fraction=.1, disk_cache_bytes=8 * 1024 ** 3,
-                    ram_cache_bytes=128 * 1024 ** 2)
+                    ram_cache_bytes=128 * 1024 ** 2, cache_frozen_validation=True)
     for key, value in defaults.items():
         job.setdefault(key, value)
     if int(job['dataset_seed']) != job['dataset_seed']:
@@ -974,7 +984,7 @@ def run_task_job(job, manifest, device):
                     frozen_feature_precision='fp32',
                     validation_positions=('all_local_positions_complete_context_intersection' if job['task'] == 'seg'
                                           else 'one_fixed_real_window_per_patient'),
-                    validation_cache='none_streaming' if job['task'] == 'seg' else 'bounded_frozen_features',
+                    validation_cache='bounded_frozen_features' if job['freeze'] and job['cache_frozen_validation'] else 'none_streaming',
                     aggregation='position -> original source frame -> patient, equally weighted sources/patients',
                     train_samples=len(train), val_samples=len(val), train_excluded=clean.excluded, val_excluded=val.excluded,
                     code_sha256={name: _file_digest(Path(__file__).parents[1] / name) for name in (
@@ -996,9 +1006,10 @@ def run_task_job(job, manifest, device):
             raise ValueError('Task output protocol mismatch; use a new output_dir')
     # One RAM bound across main process plus all worker-local readers.
     cache = _FeatureCache(job['cache_dir'], cache_identity, job['disk_cache_bytes'],
-                          job['ram_cache_bytes'] // (job['num_workers'] + 1)) if job['freeze'] else None
+                          job['ram_cache_bytes'] // (job['num_workers'] + 1),
+                          int(job['min_free_gb'] * 1024**3)) if job['freeze'] else None
     clean_inputs, train_inputs, val_inputs = (_Inputs(clean, cache, 'train'), _Inputs(train, cache, 'train'),
-                                             _Inputs(val, cache if job['task'] == 'ef' else None, 'val'))
+                                             _Inputs(val, cache if job['cache_frozen_validation'] else None, 'val'))
     resumed = torch.load(last_path, map_location='cpu', weights_only=False) if last_path.exists() else None
     if resumed and resumed['identity'] != _resume_identity(protocol):
         raise ValueError('Task resume protocol mismatch; use a new checkpoint_dir')
@@ -1263,7 +1274,8 @@ def run_task_job(job, manifest, device):
                    total_evaluation_seconds=sum(r['evaluation_seconds'] for r in progress['history']),
                    cache=dict(identity=cache_identity, disk_budget_bytes=job['disk_cache_bytes'],
                               ram_budget_bytes=job['ram_cache_bytes'], hits=cache.hits if cache else 0,
-                              misses=cache.misses if cache else 0, writes=cache.writes if cache else 0))
+                              misses=cache.misses if cache else 0, writes=cache.writes if cache else 0,
+                              skipped_low_space=cache.skipped_low_space if cache else 0))
     metrics.update(dict(mae=metrics['mae_pp']) if job['task'] == 'ef'
                    else dict(dice_patient_mean=metrics['patient_dice']))
     _json(output / 'metrics.json', metrics)

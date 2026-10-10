@@ -31,6 +31,10 @@ DEFAULT_SOURCES = dict(
     C='/root/autodl-tmp/outputs_dynamic/dynamic_refinement_20261008/ckpt/combined/epoch_0100.pt',
     F='/root/autodl-tmp/outputs_dynamic/dynamic_refinement_20261008/ckpt/factorized/epoch_0100.pt')
 QUESTION_IDS = tuple(f'Q{i}.{j}' for i in (1, 2, 3) for j in (1, 2, 3, 4))
+LEGACY_CACHE_EXECUTION = {
+    'utils/final_temporal_tasks.py': '83391f6467c01f79dfc235391fb71fa6b23e3bd764cf886b53f3ba0a39ea1b66',
+    'tools/run_temporal_final.py': 'eaad03a58918eb8ddb29897a2af1e4a6193f31d036b3beb036d56366e71c8bf1'}
+VALIDATION_CACHE_TASK_SHA256 = '0b242e80117ded82f8d8f3703dabe2c0f863c57772373acfaf8d39f279b14502'
 
 
 def scientific_code():
@@ -128,10 +132,12 @@ class Queue:
     def guard(self):
         identity = dict(version=2, sources=self.contracts, manifest=self.manifest['manifest_sha256'],
                         code=scientific_code(), config={key:value for key,value in vars(self.args).items()
-                        if key not in {'status', 'dry_run', 'preflight_only', 'device', 'num_workers'}})
+                        if key not in {'status', 'dry_run', 'preflight_only', 'device', 'num_workers', 'adopt_validation_cache'}})
         path = self.result / 'protocol.json'
-        if path.exists() and json.loads(path.read_text(encoding='utf-8')) != identity:
-            raise ValueError('Run-tag protocol/source/data/code changed; use a new RUN_TAG')
+        if path.exists():
+            previous = json.loads(path.read_text(encoding='utf-8'))
+            if previous != identity:
+                self.adopt_validation_cache(previous, identity)
         write_json(path, identity); write_json(self.manifest_path, self.manifest)
         self.code_identity = identity['code']
         try:
@@ -140,6 +146,55 @@ class Queue:
             commit = 'unavailable'
         write_json(self.result / 'implementation.json', dict(commit=commit, code=identity['code'],
                     plan='docs/时域最后一轮探索_Q1-Q3实验计划_20261010.md', parent_pid=os.getpid()))
+
+    def adopt_validation_cache(self, previous, identity):
+        ledger = self.result / 'operations' / 'validation_cache_upgrade.json'
+        if not getattr(self.args, 'adopt_validation_cache', False) or ledger.exists():
+            raise ValueError('Run-tag protocol/source/data/code changed; use a new RUN_TAG')
+        old, new = copy.deepcopy(previous), copy.deepcopy(identity)
+        old_code, new_code = old.pop('code'), new.pop('code')
+        old_budget = old['config'].pop('cache_disk_gb')
+        new_budget = new['config'].pop('cache_disk_gb')
+        if old != new or new_budget < old_budget or new_budget > 16:
+            raise ValueError('Execution upgrade cannot change data, source weights, training or evaluation settings')
+        changed = {key for key in set(old_code) | set(new_code) if old_code.get(key) != new_code.get(key)}
+        if changed != set(LEGACY_CACHE_EXECUTION) or any(old_code.get(key) != value for key,value in LEGACY_CACHE_EXECUTION.items()):
+            raise ValueError('Only the registered legacy cache implementation can be upgraded once')
+        if new_code.get('utils/final_temporal_tasks.py') != VALIDATION_CACHE_TASK_SHA256:
+            raise ValueError('Task implementation is not the regression-verified cache upgrade')
+        completed = []
+        for request in sorted((self.result / 'jobs').glob('*.json')):
+            job = json.loads(request.read_text(encoding='utf-8'))
+            output = Path(job['output_dir'])
+            if self.result.resolve() not in output.resolve().parents:
+                raise ValueError('Job is outside this run')
+            if not (output / 'DONE').exists():
+                raise ValueError('Upgrade requires a completed task boundary, not a partial task resume')
+            self.verify_done(job)
+            completed.append(dict(job=request.name, done_sha256=file_digest(output/'DONE')))
+        if not completed:
+            raise ValueError('No completed legacy results to preserve')
+        write_json(self.result / 'operations' / 'protocol_before_validation_cache.json', previous)
+        write_json(ledger, dict(version=1, reason='User-authorized frozen validation feature reuse only',
+            scientific_protocol_unchanged=True, precision='FP32 features, unchanged task heads and metrics',
+            previous_protocol_sha256=digest(previous), upgraded_protocol_sha256=digest(identity),
+            old_code=old_code, new_code=new_code, old_cache_disk_gb=old_budget, new_cache_disk_gb=new_budget,
+            preserved_completed_jobs=completed,
+            runtime_comparison_boundary='Uncached and cached validation timings must not be attributed to model architecture'))
+
+    def verify_done(self, job):
+        output = Path(job['output_dir'])
+        done = json.loads((output/'DONE').read_text(encoding='utf-8'))
+        for name,expected in done.get('artifacts',{}).items():
+            path = output/name
+            if not path.is_file() or file_digest(path) != expected:
+                raise ValueError(f'Missing/corrupted completed artifact: {path}')
+        for name,expected in done.get('checkpoints',{}).items():
+            path = Path(job['checkpoint_dir'])/name
+            if not path.is_file() or file_digest(path) != expected:
+                raise ValueError(f'Missing/corrupted completed checkpoint: {path}')
+        if not (output/'metrics.json').is_file():
+            raise ValueError('DONE without metrics')
 
     def job(self, label, kind, checkpoint, **extra):
         job = dict(kind=kind, checkpoint=str(checkpoint), output_dir=str(self.result / label),
@@ -156,22 +211,18 @@ class Queue:
         if self.code_identity is not None and scientific_code() != self.code_identity:
             raise ValueError('Implementation changed while the queue was running; no mixed-code next stage is allowed')
         request = self.result / 'jobs' / (label.replace('/', '__') + '.json')
-        if request.exists() and json.loads(request.read_text(encoding='utf-8')) != job:
-            raise ValueError(f'{label}: registered job changed')
-        write_json(request, job)
         output = Path(job['output_dir'])
         metrics = output / 'metrics.json'
+        if request.exists():
+            registered = json.loads(request.read_text(encoding='utf-8'))
+            if registered != job:
+                allowed = {'disk_cache_bytes','ram_cache_bytes'}
+                if not (output/'DONE').exists() or {k:v for k,v in registered.items() if k not in allowed} != {k:v for k,v in job.items() if k not in allowed}:
+                    raise ValueError(f'{label}: registered job changed')
+        else:
+            write_json(request, job)
         if (output / 'DONE').exists():
-            done = json.loads((output / 'DONE').read_text(encoding='utf-8'))
-            for name, expected in done.get('artifacts', {}).items():
-                if not (output / name).is_file() or file_digest(output / name) != expected:
-                    raise ValueError(f'{label}: corrupted completed artifact {name}')
-            for name, expected in done.get('checkpoints', {}).items():
-                path = Path(job['checkpoint_dir']) / name
-                if not path.is_file() or file_digest(path) != expected:
-                    raise ValueError(f'{label}: missing/corrupted completed checkpoint {name}')
-            if not metrics.exists():
-                raise ValueError(f'{label}: DONE without metrics')
+            self.verify_done(job)
             print(f'========== {label}: reuse verified completed outputs ==========', flush=True)
             self.cleanup_cache(job)
             return json.loads(metrics.read_text(encoding='utf-8'))
@@ -573,7 +624,7 @@ def parse_args():
     p.add_argument('--ft_epochs', type=int, default=80)
     p.add_argument('--max_prefix', type=int, default=128)
     p.add_argument('--min_free_gb', type=float, default=5.)
-    p.add_argument('--cache_disk_gb', type=float, default=12.)
+    p.add_argument('--cache_disk_gb', type=float, default=16.)
     p.add_argument('--cache_ram_gb', type=float, default=4.)
     p.add_argument('--max_gpu_hours', type=float)
     p.add_argument('--optional_ft', action=argparse.BooleanOptionalAction, default=True)
@@ -582,6 +633,7 @@ def parse_args():
     p.add_argument('--dry_run', action='store_true')
     p.add_argument('--preflight_only', action='store_true')
     p.add_argument('--status', action='store_true')
+    p.add_argument('--adopt_validation_cache', action='store_true', help='One verified execution-only upgrade at a completed legacy task boundary')
     p.add_argument('--device', default=None)
     args = p.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', args.run_tag):

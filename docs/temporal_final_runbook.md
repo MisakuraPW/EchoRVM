@@ -96,6 +96,16 @@ RUN_TAG=temporal_final_20261010 bash scripts/run_temporal_final.sh --max_gpu_hou
 
 只下载 `result/RUN_TAG` 及其分析压缩包；不包含权重。task结束并验证DONE后删除该任务自己的缓存；不删数据、源权重、其他run或项目。适配覆盖保存last每300成功更新，末尾保存final；不堆积逐epoch历史权重。任务last每epoch、best只在更优时覆盖。默认保留5GiB空闲，不足会在保存前报错且保留上一个有效checkpoint。
 
+### 冻结验证缓存升级
+
+冻结骨干、无验证增强时，现在同时临时缓存训练与验证的FP32原始特征，预测/loss/Dice仍由每轮当前任务头重新计算。验证人群、全部16位置、精度、早停与训练参数不变。全量微调不跨epoch缓存特征。这里的数据集特征缓存位于CPU RAM/临时磁盘，与模型的四clip FIFO和GPU工作显存不同。
+
+默认每job磁盘上限16GiB、全进程RAM缓存总预算4GiB；23648份验证网格与8108份训练网格的纯特征约9GiB，加入GT与文件开销接近12GiB，因此给16GiB余量。每job结束清理，不累计保存所有模型的特征。低磁盘余量时跳过写缓存并回退推理，保留5GiB给checkpoint。缓存不量化到FP16，也不缓存任务预测；首次填充仍需编码，后续epoch才省去反复编码。
+
+已有`01daeb3`队列只允许在已完成任务边界进行一次明确的执行升级：`--adopt_validation_cache --cache_disk_gb 16`。入口严格检查原代码哈希、源权重、清单、训练预算、所有完成结果/权重哈希；数据或训练规则变化仍拒绝。升级记录保存到`operations/validation_cache_upgrade.json`，旧protocol备份保留。已完成的旧任务不重训，运行时间对比必须注明是否缓存，不能把这种加速说成架构优势。
+
+本轮现场由`tools/handoff_temporal_validation_cache.py`等待当前P冻结分割正常完成，先做真实GPU缓存等价证书，再接续同一队列。它只结束已经暂停的调度父进程，不给当前训练worker发信号，不影响其他项目。接续日志在`operations/continued_queue.log`，状态在`operations/handoff_status.json`，证书在`operations/validation_cache_certificate.json`。不是绕过任何科学协议守卫；不需要用户再启动一份重复队列。
+
 同一命令和RUN_TAG重新运行就是续跑：已完成job核对文件/权重哈希后跳过；适配恢复model/optimizer/scaler/RNG/采样cursor；任务恢复有效更新边界与epoch、scheduler、best及早停状态。未完成的只读诊断可以重算。源码、数据或科学参数变化要求新run tag，不能把不同实现悄悄续到一套结果里。
 
 ## 五、查看进度与结果

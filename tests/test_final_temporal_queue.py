@@ -6,7 +6,8 @@ import unittest
 from unittest import mock
 import torch
 
-from tools.run_temporal_final import Queue, validate_sources
+from tools.run_temporal_final import Queue, validate_sources, LEGACY_CACHE_EXECUTION, VALIDATION_CACHE_TASK_SHA256
+from utils.final_temporal_training import write_json, file_digest
 from models.temporal_mae import TemporalMAE
 from test_final_temporal_model import tiny_config
 
@@ -74,6 +75,46 @@ class QueueContractTests(unittest.TestCase):
             torch.save(value,sources['P'])
             with self.assertRaisesRegex(ValueError,'mismatch'):
                 validate_sources(sources,smoke=True)
+
+    def upgrade_fixture(self, root):
+        queue = self.queue(root)
+        queue.args.adopt_validation_cache = True
+        out = queue.result/'P/frozen/ef'; out.mkdir(parents=True)
+        write_json(out/'metrics.json',dict(mae=4.5))
+        write_json(out/'DONE',dict(artifacts={'metrics.json':file_digest(out/'metrics.json')}))
+        write_json(queue.result/'jobs/P__frozen__ef.json',dict(output_dir=str(out),checkpoint_dir=str(queue.ckpt/'P/frozen/ef')))
+        previous = dict(version=2, sources={'C':'fixed'}, manifest='fixed',
+                        config=dict(cache_disk_gb=12,updates=1500), code=dict(LEGACY_CACHE_EXECUTION, untouched='same'))
+        current = copy.deepcopy(previous)
+        current['config']['cache_disk_gb']=16
+        current['code'].update({'utils/final_temporal_tasks.py':VALIDATION_CACHE_TASK_SHA256,
+                               'tools/run_temporal_final.py':'new_controller'})
+        return queue,previous,current,out
+
+    def test_execution_upgrade_is_once_only_and_preserves_completed_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            queue,old,new,out = self.upgrade_fixture(Path(directory))
+            before=file_digest(out/'metrics.json')
+            queue.adopt_validation_cache(old,new)
+            self.assertEqual(before,file_digest(out/'metrics.json'))
+            self.assertTrue((queue.result/'operations/validation_cache_upgrade.json').exists())
+            with self.assertRaises(ValueError):
+                queue.adopt_validation_cache(old,new)
+
+    def test_execution_upgrade_rejects_scientific_drift_partial_jobs_and_uncertified_code(self):
+        for alteration in ('source','data','updates','model_code','task_code','partial','corrupt'):
+            with self.subTest(alteration=alteration),tempfile.TemporaryDirectory() as directory:
+                queue,old,new,out=self.upgrade_fixture(Path(directory))
+                if alteration=='source': new['sources']['C']='different'
+                elif alteration=='data': new['manifest']='different'
+                elif alteration=='updates': new['config']['updates']=750
+                elif alteration=='model_code': new['code']['untouched']='different'
+                elif alteration=='task_code': new['code']['utils/final_temporal_tasks.py']='not_certified'
+                elif alteration=='partial': (out/'DONE').unlink()
+                else: write_json(out/'metrics.json',dict(mae=0.))
+                with self.assertRaises(ValueError):
+                    queue.adopt_validation_cache(old,new)
+                self.assertFalse((queue.result/'operations/validation_cache_upgrade.json').exists())
 
 
 if __name__ == '__main__':
