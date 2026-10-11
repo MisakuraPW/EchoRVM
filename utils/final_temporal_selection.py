@@ -648,7 +648,8 @@ def write_final_report(result_root, decisions, scores, artifacts_info=None, *, a
     root.mkdir(parents=True, exist_ok=True)
     report, comparison, decision_file = (root / name for name in ('Q1-Q3_closure.md', 'comparison.csv', 'decisions.json'))
     columns = ['model_id', 'ef_mae_pp', 'patient_dice_fraction', *_DOMAINS,
-               'memory_slots', 'history_metrics', 'representation_patient_count']
+               'memory_slots', 'history_metrics', 'representation_patient_count',
+               'ef_patience', 'seg_patience', 'ef_epochs_completed', 'seg_epochs_completed']
     rows = []
     for model in sorted(scores):
         record = scores[model] or {}
@@ -658,6 +659,10 @@ def write_final_report(result_root, decisions, scores, artifacts_info=None, *, a
                    memory_slots=_slots(model, record),
                    history_metrics=_display(record['history']) if record.get('history') else '')
         row.update({key: _number(representation.get(key), key) for key in _DOMAINS})
+        for task in ('ef', 'seg'):
+            task_record = record.get(task) or {}
+            row[task + '_patience'] = task_record.get('patience')
+            row[task + '_epochs_completed'] = task_record.get('epochs_completed')
         observations = representation.get('patient_observations')
         row['representation_patient_count'] = len(_patient_map(observations)) if observations else None
         rows.append(row)
@@ -669,6 +674,12 @@ def write_final_report(result_root, decisions, scores, artifacts_info=None, *, a
         ef = 'unavailable' if row['ef_mae_pp'] is None else f"{row['ef_mae_pp']:.6g}"
         dice = 'unavailable' if row['patient_dice_fraction'] is None else f"{row['patient_dice_fraction']:.6g}"
         lines.append(f'| {model} | {ef} | {dice} |')
+    observed_patience = {r[key] for r in rows for key in ('ef_patience', 'seg_patience') if r[key] is not None}
+    if 10 in observed_patience and 20 in observed_patience:
+        lines.extend(['', 'Budget note: P full fine-tuning retained patience20; later full fine-tuning uses '
+                      'patience10. P is an extended-budget reference, not an equal-stop-policy FT ranking. '
+                      'C/F share the same later policy; frozen readouts retain patience12. '
+                      'Per-task patience and completed epochs are recorded in comparison.csv.'])
     for key, entry in questions.items():
         lines.extend(['', f"## {key} {entry['title']}", '',
                       f"Status: {entry['status']}; closed: {str(entry['closed']).lower()}.",

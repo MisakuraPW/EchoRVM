@@ -276,7 +276,8 @@ class Queue:
         label = f'{group or model_id}/{style}/{task}' + (f'_{exit_name}' if exit_name != 'final' else '') + (f'_seed{seed}' if seed != 42 else '')
         job = self.job(label, 'task', checkpoint, task=task, freeze=freeze, exit_name=exit_name, seed=seed,
                        epochs=1 if self.args.smoke else self.args.frozen_epochs if freeze else self.args.ft_epochs,
-                       patience=12 if freeze else 20,
+                       patience=12 if freeze else 20 if model_id == 'P' else
+                       getattr(self.args, 'followup_ft_patience', 20),
                        effective_batch=2 if self.args.smoke else 12 if task == 'ef' else 64,
                        disk_cache_bytes=int(self.args.cache_disk_gb * 1024**3),
                        ram_cache_bytes=int(self.args.cache_ram_gb * 1024**3))
@@ -285,6 +286,7 @@ class Queue:
             if self.contracts['C']['model']['img_size'] != 112:
                 job.update(head_dim=24, head_depth=1, head_heads=3)
         value = self.run(label, job)
+        value['patience'] = job['patience']
         with Path(value['patient_predictions_path']).open(newline='', encoding='utf-8') as handle:
             rows = list(csv.DictReader(handle))
         value['patient_keys'] = sorted(row['patient'] for row in rows)
@@ -622,6 +624,8 @@ def parse_args():
     p.add_argument('--updates', type=int, default=1500)
     p.add_argument('--frozen_epochs', type=int, default=60)
     p.add_argument('--ft_epochs', type=int, default=80)
+    p.add_argument('--followup_ft_patience', type=int, choices=(10, 20), default=20,
+                   help='Non-P full fine-tuning patience; P stays20, frozen stays12')
     p.add_argument('--max_prefix', type=int, default=128)
     p.add_argument('--min_free_gb', type=float, default=5.)
     p.add_argument('--cache_disk_gb', type=float, default=16.)
