@@ -1,4 +1,22 @@
-# Recurrent Echo MAE
+# CR-EchoMAE / EchoRVM
+
+## 当前入口（2026-10）
+
+协作者请先读 [代码库总览](README_RESEARCH.md)。新实验使用
+[统一pipeline脚手架](docs/pipeline_guide.md)，评测口径见
+[评测与证据协议](docs/pipeline_evaluation.md)，来源与风险见
+[GitHub参考说明](docs/pipeline_sources_and_tradeoffs.md)。
+
+```bash
+python -m research_pipeline --help
+python -m research_pipeline smoke --config configs/pipeline/synthetic.yaml --tag selftest
+```
+
+下面保留的是早期入口说明，仅用于追溯旧实验；其中默认9/37组队列、阶段定位及路径不是新研究的默认方案。
+
+---
+
+# 历史说明：Recurrent Echo MAE
 
 ## 时域表征研究入口（v1）
 
@@ -57,7 +75,7 @@ echo_aug_validation/  数据增强验证代理实验
 
 ## 私有文档
 
-`docs/` 和 `资料/` 是本地研究资料与实验说明，默认不上传 GitHub。
+`资料/` 和部分本地研究草稿默认不上传GitHub；已跟踪的执行文档、公共pipeline说明与协作研究Excel属于本仓库，不按私有临时文件处理。
 
 ## 数据路径约定
 

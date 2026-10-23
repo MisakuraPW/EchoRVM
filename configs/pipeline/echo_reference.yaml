@@ -1,0 +1,92 @@
+# Reference protocol, not a claim that a final conference method has been chosen.
+# Native checkpoint must match FinalTemporalMAE's saved scientific config.
+version: 1
+run:
+  root: /root/autodl-tmp/outputs_cr
+  tag: cr_reference_v1
+adapter: research_pipeline.echo:build
+data:
+  manifest: /root/autodl-tmp/outputs_cr/manifests/dynamic_train_val.json
+  local_frames: 16
+  recent_frames: 64
+  max_prefix: 128
+  prefix: 0
+  seed: 42
+  val_positions: all
+  augmentation:
+    enabled: true
+    preset: A4_tgc_zoom_speckle
+    per_frame_random: false
+model:
+  overrides: {}
+runtime:
+  device: cuda
+  precision: bf16
+  autotune: true
+  micro_batch: 4
+  batch_candidates: [1, 2, 4, 8, 16, 32]
+  worker_candidates: [0, 2, 4, 8]
+  checkpoint_candidates: [false, true]
+  cache_gb: 24
+  min_free_gb: 2
+training:
+  seed: 42
+  epochs: 100
+  effective_batch: 32
+  lr: 0.0001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1
+  patience: 10
+  checkpoint_every: 10
+  keep_snapshots: 2
+  tensorboard: true
+evaluation:
+  boundaries: false
+  cache_frozen: true
+  representation_max_samples: 128
+  representation_interventions: true
+stages:
+  - id: pretrain
+    kind: mae
+    source: ckpt/mae/REPLACE_WITH_NATIVE_TEMPORAL_CHECKPOINT.pt
+    training:
+      epochs: 400
+      patience: null
+      eval_every: 25
+      save_epochs: [100, 200, 400]
+  - id: ef_linear
+    kind: ef
+    mode: frozen_linear
+    source: '@pretrain/final'
+  - id: seg_linear
+    kind: seg
+    mode: frozen_linear
+    source: '@pretrain/final'
+  - id: ef_lite
+    kind: ef
+    mode: frozen_lite
+    source: '@pretrain/final'
+  - id: seg_lite
+    kind: seg
+    mode: frozen_lite
+    source: '@pretrain/final'
+  - id: representation
+    kind: representation
+    mode: frozen_linear
+    readout_task: ef
+    source: '@pretrain/final'
+  - id: ef_ft
+    kind: ef
+    mode: finetune
+    source: '@pretrain/final'
+  - id: seg_ft
+    kind: seg
+    mode: finetune
+    source: '@pretrain/final'
+  - id: streaming
+    kind: streaming
+    source: '@pretrain/final'
+    audit:
+      max_frames: 512
+      max_cases: 2

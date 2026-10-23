@@ -35,6 +35,9 @@ docs/*
 !docs/时域最后一轮探索_Q1-Q3实验计划_20261010.md
 !docs/temporal_final_runbook.md
 !docs/AGENTS.md
+!docs/pipeline_guide.md
+!docs/pipeline_evaluation.md
+!docs/pipeline_sources_and_tradeoffs.md
 docs/~$*.xlsx
 资料/
 

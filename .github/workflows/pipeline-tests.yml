@@ -1,0 +1,26 @@
+name: Research pipeline CPU contracts
+on:
+  push:
+    paths:
+      - 'research_pipeline/**'
+      - 'configs/pipeline/**'
+      - 'tests/test_research_pipeline*.py'
+      - '.github/workflows/pipeline-tests.yml'
+  pull_request:
+    paths:
+      - 'research_pipeline/**'
+      - 'configs/pipeline/**'
+      - 'tests/test_research_pipeline*.py'
+jobs:
+  cpu-contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+      - run: pip install numpy scipy pyyaml matplotlib pandas opencv-python-headless scikit-image timm einops
+      - run: python -m unittest discover -s tests -p 'test_research_pipeline*.py' -v
+      - run: python -m research_pipeline smoke --config configs/pipeline/synthetic.yaml --tag ci

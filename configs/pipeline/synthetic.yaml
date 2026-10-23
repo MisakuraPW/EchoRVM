@@ -1,0 +1,45 @@
+version: 1
+run:
+  root: outputs/pipeline_selftest
+  tag: synthetic_v1
+adapter: research_pipeline.synthetic:build
+runtime:
+  device: cpu
+  autotune: false
+  micro_batch: 2
+  worker_candidates: [0]
+  precision: fp32
+  min_free_gb: 0
+  cache_gb: 0.1
+training:
+  epochs: 2
+  warmup_epochs: 0
+  effective_batch: 4
+  checkpoint_every: 1
+  tensorboard: false
+stages:
+  - id: mae
+    kind: mae
+    training:
+      patience: null
+  - id: ef_linear
+    kind: ef
+    mode: frozen_linear
+    source: '@mae/final'
+  - id: seg_linear
+    kind: seg
+    mode: frozen_linear
+    source: '@mae/final'
+  - id: ef_ft
+    kind: ef
+    mode: finetune
+    source: '@mae/final'
+  - id: seg_ft
+    kind: seg
+    mode: finetune
+    source: '@mae/final'
+  - id: geometry
+    kind: representation
+    readout_task: ef
+    mode: frozen_linear
+    source: '@mae/final'
