@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import hashlib
 import importlib
 import inspect
 import json
@@ -56,7 +57,8 @@ def prepare_features(exp, cfg, source, heartbeat):
         directory = root / 'frozen' / digest(key)
         return prepare_cache(exp, directory, key,
                              int(cfg['runtime']['cache_gb']*1024**3), int(cfg['runtime']['min_free_gb']*1024**3),
-                             heartbeat, batch_size=cfg['runtime']['micro_batch'], budget_root=root)
+                             heartbeat, batch_size=cfg['runtime']['micro_batch'], budget_root=root,
+                             evict_completed=cfg['runtime']['evict_completed_feature_caches'])
     return None
 
 
@@ -98,7 +100,7 @@ def csv_rows(path, rows):
     temporary.replace(path)
 
 
-def publish_history(output, history):
+def publish_history(output, history, diagnostic=False):
     csv_rows(output / 'metrics.csv', history)
     if not history:
         return
@@ -109,7 +111,7 @@ def publish_history(output, history):
     epochs = [row['epoch'] for row in history]
     axes[0].plot(epochs, [row['train_loss'] for row in history], label='train', color='#0072B2', linestyle='-', marker='.')
     if any(row.get('val_loss') is not None for row in history):
-        axes[0].plot(epochs, [row.get('val_loss', np.nan) for row in history], label='validation', color='#D55E00', marker='o', linestyle='--')
+        axes[0].plot(epochs, [row.get('val_loss', np.nan) for row in history], label='seen-data diagnostic' if diagnostic else 'validation', color='#D55E00', marker='o', linestyle='--')
     axes[0].set(xlabel='Epoch', ylabel='Loss'); axes[0].legend()
     key = next((k for k in ('val_mae_pp', 'val_dice_mean', 'val_reconstruction_loss') if any(k in row for row in history)), None)
     if key:
@@ -189,7 +191,7 @@ def run_training(cfg, source):
     if not params:
         raise ValueError('No trainable parameters')
     train = cfg['training']
-    optimizer = torch.optim.AdamW(params, lr=train['lr'], weight_decay=train['weight_decay'])
+    optimizer = torch.optim.AdamW(params, lr=train['lr'], weight_decay=train['weight_decay'], betas=tuple(train['betas']))
     per_epoch = math.ceil(len(exp.train)/train['effective_batch'])
     total, warmup = train['epochs']*per_epoch, train['warmup_epochs']*per_epoch
 
@@ -211,7 +213,8 @@ def run_training(cfg, source):
         set_rng_state(resumed['rng'])
         if progress['best_file'] and not (checkpoints / progress['best_file']).is_file():
             raise ValueError('Resume refers to a missing best checkpoint')
-    publish_history(output, progress['history'])
+    diagnostic = bool(exp.metadata.get('diagnostic_overlap'))
+    publish_history(output, progress['history'], diagnostic)
     writer = None
     if train['tensorboard']:
         try:
@@ -233,6 +236,16 @@ def run_training(cfg, source):
                           last_path, min_free_gb=cfg['runtime']['min_free_gb'])
 
     try:
+        if 0 in train['save_epochs'] and not (checkpoints / 'epoch_0000.pt').exists():
+            if progress['epoch']:
+                raise ValueError('Initial checkpoint is missing; cannot reconstruct epoch 0 from trained weights')
+            atomic_torch_save(weights(0), checkpoints / 'epoch_0000.pt', min_free_gb=cfg['runtime']['min_free_gb'])
+        if exp.task == 'mae' and 0 in train['save_epochs'] and progress['epoch'] == 0 and not (output / 'initial_diagnostic.json').exists():
+            loss, metrics, _, _ = evaluate(exp, cfg, selection, beat)
+            write_json(output / 'initial_diagnostic.json', dict(epoch=0, loss=loss, metrics=metrics,
+                       diagnostic_overlap=diagnostic, selection='never used to select or stop SSL'))
+            with torch.no_grad():
+                exp.preview(preview_samples, output / 'previews' / 'epoch_0000')
         if not resumed:
             save_last()
         while progress['epoch'] < train['epochs'] and not progress['stopped']:
@@ -246,8 +259,12 @@ def run_training(cfg, source):
                 training_loader.batch_sampler.epoch = epoch
                 training_loader.generator.manual_seed(train['seed']+epoch)
             exp.train_mode()
+            if device.type == 'cuda':
+                torch.cuda.reset_peak_memory_stats(device)
             optimizer.zero_grad(set_to_none=True)
             begin, seen, pending, loss_sum, wait_sum = time.perf_counter(), 0, 0, 0., 0.
+            sampled_frames, sampled_clips, window_digest = 0, 0, hashlib.sha256()
+            prefix_histogram = {}
             monitor_sum, pending_monitors = {}, {}
             pending_loss = None
             effective = train['effective_batch']
@@ -259,6 +276,16 @@ def run_training(cfg, source):
                 wait_sum += time.perf_counter()-waiting
                 if samples is None:
                     break
+                for sample in samples:
+                    if 'video' in sample and sample['video'].ndim == 4:
+                        frames = len(sample['video'])
+                        sampled_frames += frames
+                        sampled_clips += frames//int(cfg['data'].get('local_frames', frames))
+                    if 'frame_indices' in sample:
+                        indices = sample['frame_indices'].tolist()
+                        window_digest.update(digest([sample['patient'], indices, sample.get('prefix_frames', 0)]).encode())
+                        key = str(sample.get('prefix_frames', 0))
+                        prefix_histogram[key] = prefix_histogram.get(key, 0)+1
                 with amp_context(cfg, device):
                     loss = exp.loss(samples)
                 for name, metric in exp.last_metrics.items():
@@ -299,9 +326,16 @@ def run_training(cfg, source):
             row = dict(epoch=epoch+1, train_loss=loss_sum/seen, train_seconds=train_seconds,
                        samples_per_second=seen/train_seconds, data_wait_seconds=wait_sum,
                        lr=optimizer.param_groups[0]['lr'], successful_updates=progress['global_step'])
+            row.update(visited_windows=seen, observed_frames=sampled_frames, observed_clips=sampled_clips,
+                       frames_per_second=sampled_frames/train_seconds, window_sequence_sha256=window_digest.hexdigest(),
+                       prefix_histogram_json=json.dumps(prefix_histogram, sort_keys=True))
+            if device.type == 'cuda':
+                row.update(train_peak_allocated_bytes=torch.cuda.max_memory_allocated(device),
+                           train_peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
             row.update({f'train_{name}': value/seen for name, value in monitor_sum.items()})
             improved, previous_best = False, progress['best_file']
-            if (epoch+1) % train['eval_every'] == 0 or epoch+1 == train['epochs']:
+            evaluated = (epoch+1) % train['eval_every'] == 0 or epoch+1 == train['epochs']
+            if evaluated:
                 val_started = time.perf_counter()
                 val_loss, metrics, patients, observations = evaluate(exp, cfg, selection, beat, validation_loader)
                 row.update(val_loss=val_loss, val_seconds=time.perf_counter()-val_started,
@@ -329,6 +363,11 @@ def run_training(cfg, source):
                 for path in unpinned[:max(0, len(unpinned)-train['keep_snapshots'])]:
                     path.unlink()
             csv_rows(output / 'metrics.csv', progress['history'])
+            if evaluated:
+                publish_history(output, progress['history'], diagnostic)
+                if exp.task == 'mae':
+                    with torch.no_grad():
+                        exp.preview(preview_samples, output / 'previews' / f'epoch_{epoch+1:04d}')
             event(output / 'events.jsonl', phase='epoch_completed', **row)
             print(json.dumps(dict(stage=cfg['stage']['id'], **row), ensure_ascii=False), flush=True)
             if writer:
@@ -346,10 +385,11 @@ def run_training(cfg, source):
         write_json(output / 'strata.json', stratify(observations, exp.task))
         write_json(output / 'patients.json', patients)
         csv_rows(output / 'patients.csv', patients)
-        publish_history(output, progress['history'])
+        publish_history(output, progress['history'], diagnostic)
         summary = dict(stage=cfg['stage']['id'], kind=exp.task, mode=cfg['stage'].get('mode'),
                        metrics=metrics, epoch=progress['epoch'], selected_epoch=selected['epoch'],
                        stopped_early=progress['stopped'], selection='final fixed epoch' if exp.task == 'mae' else 'VAL only',
+                       smoke=bool(cfg.get('smoke')),
                        synthetic=bool(exp.metadata.get('synthetic')), protocol_sha256=identity_sha,
                        model_parameters=sum(p.numel() for p in exp.model.parameters()),
                        trainable_parameters=sum(p.numel() for p in exp.model.parameters() if p.requires_grad),
@@ -358,11 +398,13 @@ def run_training(cfg, source):
                        parameter_count_scope='full adapter including inactive reconstruction decoder; observed gradients reported separately',
                        checkpoints={name: dict(path=str(checkpoints / name), sha256=file_hash(checkpoints / name),
                                                bytes=(checkpoints / name).stat().st_size)
-                                    for name in {selected_name, 'final.pt'}},
+                                    for name in {selected_name, 'final.pt', *[p.name for p in checkpoints.glob('epoch_*.pt')]}},
                        best_file=selected_name, wall_seconds=time.perf_counter()-started,
                        completed_train_seconds=sum(r['train_seconds'] for r in progress['history']),
                        completed_validation_seconds=sum(r.get('val_seconds', 0.) for r in progress['history']),
-                       scope='TRAIN/VAL development only; no TEST opened by this adapter', cache=cache_report)
+                       scope=exp.metadata.get('evaluation_scope', 'TRAIN/VAL development only; no TEST opened by this adapter'),
+                       ssl_data_exposure=exp.metadata.get('ssl_data_exposure'),
+                       diagnostic_overlap=diagnostic, cache=cache_report)
         write_json(output / 'summary.json', summary)
         mark_done(output, ['summary.json', 'protocol.json', 'metrics.csv', 'patients.json', 'observations.json', 'strata.json'])
         beat(force=True, phase='done', epoch=progress['epoch'], metrics=metrics)

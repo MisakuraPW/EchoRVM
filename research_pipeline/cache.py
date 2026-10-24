@@ -58,14 +58,35 @@ def _metadata(sample):
     return value
 
 
-def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes, heartbeat=None, batch_size=4, budget_root=None):
+def _make_space(directory, destination, budget_root, expected, budget_bytes, min_free_bytes, heartbeat):
+    """Evict only finished, disposable caches in this run, never checkpoints/results."""
+    base = directory.parent.resolve()
+    candidates = sorted((p for p in base.iterdir() if p.is_dir() and p.resolve() != directory.resolve()),
+                        key=lambda p:p.stat().st_mtime_ns)
+    def fits():
+        other = sum(p.stat().st_size for p in budget_root.rglob('*') if p.is_file() and not p.is_relative_to(destination))
+        return other+expected <= budget_bytes and shutil.disk_usage(directory).free >= expected+min_free_bytes
+    for victim in candidates:
+        if fits():
+            break
+        if victim.is_symlink() or not victim.resolve().is_relative_to(base):
+            continue
+        if not all((victim / split / 'DONE.json').is_file() for split in ('train', 'val')):
+            continue
+        if heartbeat:
+            heartbeat(force=True, phase='evict_completed_feature_cache', directory=str(victim))
+        shutil.rmtree(victim)
+
+
+def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes, heartbeat=None, batch_size=4, budget_root=None,
+                  evict_completed=False):
     if not experiment.cacheable:
         raise ValueError('Frozen caching requires an adapter declaring deterministic unaugmented features')
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if budget_root is not None:
         used = sum(p.stat().st_size for p in Path(budget_root).rglob('*') if p.is_file())
-        if used > budget_bytes:
+        if used > budget_bytes and not evict_completed:
             raise OSError('Existing run cache exceeds cache_gb; explicitly clean unneeded cache or increase its budget')
     required_total = 0
     for split in ('train', 'val'):
@@ -96,6 +117,8 @@ def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes,
         expected = len(dataset) * (first.nbytes + target.nbytes) + 1024 * 1024
         required_total += expected
         budget_root = Path(budget_root) if budget_root else directory
+        if evict_completed:
+            _make_space(directory, destination, budget_root, expected, budget_bytes, min_free_bytes, heartbeat)
         other_bytes = sum(p.stat().st_size for p in budget_root.rglob('*')
                           if p.is_file() and not p.is_relative_to(destination))
         if required_total > budget_bytes or other_bytes+expected > budget_bytes:
@@ -139,4 +162,5 @@ def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes,
                              reuse_check='size+mtime; SHA256 recorded at creation'))
         setattr(experiment, split, FeatureDataset(destination))
     return dict(bytes=required_total, directory=str(directory), precision='fp32',
+                completed_cache_eviction=bool(evict_completed),
                 note='Deterministic frozen features only; no augmentation or encoder updates')

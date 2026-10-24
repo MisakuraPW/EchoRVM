@@ -109,6 +109,8 @@ class EchoExperiment(Experiment):
             return [self.train[0]] * batch_size
         from utils.final_temporal_data import WindowDataset
         data = self.train.dataset
+        if hasattr(data, 'calibration_samples'):
+            return data.calibration_samples(batch_size)
         candidates = []
         for index, record in enumerate(data.records):
             case = data.cases[record['patient']]
@@ -216,15 +218,25 @@ class EchoExperiment(Experiment):
                 if pred.any():
                     axes[2].contour(pred, levels=[.5], colors=['#D55E00'])
             else:
-                if self.model.norm_pix_loss:
-                    write_json(directory / 'preview_policy.json', dict(skipped='Patch-normalized targets require an explicit inverse normalization; no misleading pixel rendering'))
-                    return
                 result = self._mae([sample])
                 q, p, grid, channels = self.model.tubelet_size, self.model.patch_size, self.model.token_grid[1], self.model.in_chans
                 frames = result['pred'].shape[1] // (grid*grid) * q
                 def unpatchify(value):
                     return value.reshape(1, frames//q, grid, grid, q, p, p, channels).permute(0, 1, 4, 7, 2, 5, 3, 6).reshape(1, frames, channels, grid*p, grid*p)
-                target, prediction = unpatchify(result['target']), unpatchify(result['pred'])
+                target_patches, predicted_patches = result['target'], result['pred']
+                if self.model.norm_pix_loss:
+                    from models.video_mae import tubelet_patchify
+                    video = sample['video'][None].to(predicted_patches)
+                    if self.model.in_chans == 1:
+                        video = video[:, :, :1]
+                    raw = tubelet_patchify(self.model._normalize_input(video[:, -frames:]), q, p)
+                    mean, std = raw.mean(-1, keepdim=True), (raw.var(-1, keepdim=True, unbiased=False)+1e-6).sqrt()
+                    target_patches = target_patches*std+mean
+                    predicted_patches = predicted_patches*std+mean
+                    write_json(directory / 'preview_policy.json', dict(
+                        policy='GT per-patch mean/std invert normalized targets for visualization only; NOT raw-pixel reconstruction quality',
+                        displayed_frame='middle reconstructed frame', clipping='display range [0,1]'))
+                target, prediction = unpatchify(target_patches), unpatchify(predicted_patches)
                 if self.model.input_mean is not None:
                     target = target*self.model.input_std.to(target)+self.model.input_mean.to(target)
                     prediction = prediction*self.model.input_std.to(prediction)+self.model.input_mean.to(prediction)
@@ -238,11 +250,12 @@ class EchoExperiment(Experiment):
                     axis.set_title(title); axis.axis('off')
             fig.savefig(directory / f'fixed_case_{index:02d}.png', dpi=150)
             plt.close(fig)
-        write_json(directory / 'selection.json', dict(policy='first two deterministic VAL records, never best-looking cases',
+        write_json(directory / 'selection.json', dict(policy='first two deterministic diagnostic/VAL records, never best-looking cases',
                                                      ids=[s['sample_id'] for s in samples]))
 
     def model_export(self):
-        return dict(model_state_dict=self.backbone.state_dict(), config=dict(model=self.native_config))
+        return dict(model_state_dict=self.backbone.state_dict(),
+                    config=dict(model=self.native_config, pretraining_data_protocol=self.pretraining_protocol))
 
 
 class IdentifiedDataset(torch.utils.data.Dataset):
@@ -273,7 +286,9 @@ def build(config, stage, source, device):
     if source:
         backbone, saved, report = load_final_model(source, model.get('overrides'), seed)
         native = saved['model']
+        pretraining_protocol = saved.get('pretraining_data_protocol', {})
     else:
+        pretraining_protocol = {}
         native = model.get('config')
         if not native:
             raise ValueError('Provide model.config for initialization or a native checkpoint source')
@@ -284,7 +299,6 @@ def build(config, stage, source, device):
             report['sha256'] = file_hash(model['init_checkpoint'])
             if report.get('missing_encoder_keys'):
                 raise ValueError(f'Incomplete encoder initialization: {report["missing_encoder_keys"]}')
-    manifest = _load_manifest(data['manifest'])
     recent = int(data.get('recent_frames', 64))
     local = backbone.local_frames
     if data.get('local_frames', local) != local or recent % local:
@@ -293,15 +307,32 @@ def build(config, stage, source, device):
     augmentation = data.get('augmentation') if not frozen else None
     arguments = dict(task=task, recent_frames=recent, local_frames=local,
                      max_prefix=data.get('max_prefix', 128), prefix=data.get('prefix', 0), seed=data.get('seed', seed))
-    train = WindowDataset(manifest, 'train', training=not frozen, positions='balanced',
-                          aug_cfg=augmentation, limit=data.get('limit_train'), **arguments)
-    val = WindowDataset(manifest, 'val', training=False, positions=data.get('val_positions', 'all'),
-                        limit=data.get('limit_val'), **arguments)
+    all_ssl = task == 'mae' and bool(data.get('ssl_manifest'))
+    if all_ssl:
+        from .ssl_data import SSLWindowDataset, load_ssl_manifest
+        manifest = load_ssl_manifest(data['ssl_manifest'])
+        if (manifest['local_frames'], manifest['recent_frames'], manifest['max_prefix']) != (local, recent, arguments['max_prefix']):
+            raise ValueError('SSL inventory and model/data window dimensions disagree')
+        if backbone.reconstruction_recent_frames < recent+arguments['max_prefix']:
+            raise ValueError('Clean all-window SSL must reconstruct every observed clip, including its prefix')
+        train = SSLWindowDataset(manifest, True, arguments['seed'], limit=data.get('limit_train'), augmentation=augmentation)
+        val = SSLWindowDataset(manifest, False, arguments['seed'], data.get('diagnostic_cases', 64), data.get('limit_val'))
+        used_manifest = data['ssl_manifest']
+        pretraining_protocol = dict(exposure=manifest['exposure'], manifest_sha256=digest(manifest),
+                                    counts=manifest['counts'], labels_used=False,
+                                    window_policy=manifest['sampling'])
+    else:
+        manifest = _load_manifest(data['manifest'])
+        train = WindowDataset(manifest, 'train', training=not frozen, positions='balanced',
+                              aug_cfg=augmentation, limit=data.get('limit_train'), **arguments)
+        val = WindowDataset(manifest, 'val', training=False, positions=data.get('val_positions', 'all'),
+                            limit=data.get('limit_val'), **arguments)
+        used_manifest = data['manifest']
     if not len(train) or not len(val):
-        raise ValueError('No eligible TRAIN/VAL records')
+        raise ValueError('No eligible SSL/diagnostic videos' if all_ssl else 'No eligible TRAIN/VAL records')
     train_ids = {r['patient'] for r in train.records}
     val_ids = {r['patient'] for r in val.records}
-    if train_ids & val_ids:
+    if train_ids & val_ids and not all_ssl:
         raise ValueError('Patient leakage between TRAIN and VAL')
     if task != 'mae':
         backbone = TemporalTask(backbone, task, stage.get('mode', 'frozen_linear'), recent,
@@ -312,15 +343,20 @@ def build(config, stage, source, device):
                     train_ids=sorted(train_ids), val_ids=sorted(val_ids),
                     train_excluded=train.excluded, val_excluded=val.excluded,
                     train_records_sha256=digest(train.records), val_records_sha256=digest(val.records),
-                    data_files={str(Path(data['manifest'])): file_hash(data['manifest'])},
+                    data_files={str(Path(used_manifest)): file_hash(used_manifest)},
                     input='native112 gray_repeat3, no RGB disk cache',
                     head=type(backbone.head).__name__ if task != 'mae' else None,
                     loss='masked pixel objective from native model' if task == 'mae' else
                          'Huber on EF/100; metrics in pp' if task == 'ef' else 'per-sample CE + foreground soft Dice',
-                    aggregation='positions -> source frame -> patient', test_access=False,
+                    aggregation='positions -> source frame -> patient', test_access=all_ssl,
+                    ssl_data_exposure=pretraining_protocol.get('exposure', 'source-dependent; inspect native source provenance'),
+                    diagnostic_overlap=all_ssl,
+                    evaluation_scope='Seen-population reconstruction diagnostic; no held-out SSL validation or checkpoint selection' if all_ssl else
+                        'TRAIN supervised fitting, VAL selection; TEST labels unopened. Source SSL may have seen VAL/TEST images; see ssl_data_exposure',
                     mask_policy='record-index + epoch keyed train masks; fixed record-index VAL masks')
     exp = EchoExperiment(backbone.to(device), IdentifiedDataset(train, 'train'), IdentifiedDataset(val, 'val'),
                          task, metadata, microbatch_safe=True, cacheable=frozen and task != 'mae')
     exp.native_config = native
+    exp.pretraining_protocol = pretraining_protocol
     exp.seed = seed
     return exp

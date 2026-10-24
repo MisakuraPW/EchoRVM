@@ -41,7 +41,9 @@ def source_path(cfg, stage):
         if not verify_done(directory):
             raise ValueError(f'Source stage not completed: {name}')
         summary = json.loads((directory / 'summary.json').read_text(encoding='utf-8'))
-        target = 'final.pt' if which == 'final' else summary['best_file']
+        target = 'final.pt' if which == 'final' else summary['best_file'] if which == 'best' else which+'.pt'
+        if target not in summary['checkpoints']:
+            raise ValueError(f'Source checkpoint was not retained: {name}/{which}')
         info = summary['checkpoints'][target]
         if not Path(info['path']).is_file() or file_hash(info['path']) != info['sha256']:
             raise ValueError('Source checkpoint missing or changed')
@@ -138,6 +140,8 @@ def report(config):
                      f"{metrics.get('mae_pp', '')} | {metrics.get('dice_mean', '')} |")
     if any(row.get('synthetic') for row in rows):
         lines += ['', '**SYNTHETIC FIXTURE: these results are software checks, not research findings.**']
+    if any(row.get('smoke') for row in rows):
+        lines += ['', '**SMOKE ONLY: truncated software checks, not scientific baseline results.**']
     (root / 'comparison.md').write_text('\n'.join(lines)+'\n', encoding='utf-8')
 
 
@@ -223,6 +227,7 @@ def main():
     item.add_argument('--local-frames', type=int, default=16)
     item.add_argument('--max-prefix', type=int, default=128)
     item.add_argument('--smoke', action='store_true')
+    item.add_argument('--scope', choices=['train_val', 'all_ssl'], default='train_val')
     item = sub.add_parser('metrics', help='Re-evaluate saved observations with the common definitions')
     item.add_argument('--observations', required=True)
     item.add_argument('--task', choices=['mae', 'ef', 'seg'], required=True)
@@ -262,9 +267,14 @@ def main():
     elif args.command == 'report':
         report(json.loads((Path(args.root) / 'result' / args.tag / 'plan.json').read_text(encoding='utf-8')))
     elif args.command == 'manifest':
-        from utils.final_temporal_data import build_manifest
-        value = build_manifest(args.data_root, recent_frames=args.recent_frames, local_frames=args.local_frames,
-                               max_prefix=args.max_prefix, smoke=args.smoke)
+        if args.scope == 'all_ssl':
+            from .ssl_data import build_ssl_manifest
+            value = build_ssl_manifest(args.data_root, recent_frames=args.recent_frames, local_frames=args.local_frames,
+                                       max_prefix=args.max_prefix)
+        else:
+            from utils.final_temporal_data import build_manifest
+            value = build_manifest(args.data_root, recent_frames=args.recent_frames, local_frames=args.local_frames,
+                                   max_prefix=args.max_prefix, smoke=args.smoke)
         write_json(args.output, value)
     elif args.command == 'metrics':
         from .metrics import summarize

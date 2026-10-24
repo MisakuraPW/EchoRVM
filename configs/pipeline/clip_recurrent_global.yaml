@@ -1,0 +1,137 @@
+# New clean trajectory, NOT a continuation of the short exploratory variants.
+version: 1
+run:
+  root: /root/autodl-tmp/outputs_cr_clean
+  tag: clip_recurrent_global_v1
+adapter: research_pipeline.echo:build
+data:
+  manifest: /root/autodl-tmp/outputs_cr_clean/manifests/dynamic_train_val.json
+  ssl_manifest: /root/autodl-tmp/outputs_cr_clean/manifests/dynamic_all_ssl.json
+  local_frames: 16
+  recent_frames: 64
+  max_prefix: 128
+  prefix: null
+  diagnostic_cases: 64
+  seed: 42
+  val_positions: all
+  augmentation:
+    enabled: false
+model:
+  init_checkpoint: ckpt/mae/videomae_vit_s.pth
+  overrides: {}
+  config:
+    img_size: 112
+    patch_size: 16
+    in_chans: 3
+    local_frames: 16
+    clip_count: 4
+    tubelet_size: 2
+    embed_dim: 384
+    depth: 12
+    num_heads: 6
+    decoder_embed_dim: 192
+    decoder_depth: 4
+    decoder_num_heads: 3
+    position_embedding: flat_sinusoid
+    separate_qv_bias: true
+    decoder_embed_bias: false
+    norm_eps: 0.000001
+    mask_ratio: 0.9
+    mask_strategy: tube
+    research_mask: tube
+    norm_pix_loss: true
+    # ImageNet input normalization, unchanged across SSL and all task readouts.
+    input_mean: [0.485, 0.456, 0.406]
+    input_std: [0.229, 0.224, 0.225]
+    drop_path_rate: 0.0
+    memory_mode: global
+    core_depth: 1
+    memory_compression: mean
+    memory_write_source: fused
+    memory_read_location: tokens
+    frame_readout: repeat
+    allow_variable_context: true
+    reconstruction_recent_frames: 192
+    candidate_rank: 0
+    dynamic_orthogonal_weight: 0.0
+    frequency_conditioned: false
+    frequency_loss_weight: 0.0
+runtime:
+  device: cuda
+  precision: bf16
+  autotune: true
+  micro_batch: 4
+  batch_candidates: [1, 2, 4, 8, 16, 32]
+  worker_candidates: [0, 2, 4, 8]
+  checkpoint_candidates: [false, true]
+  cache_gb: 24
+  evict_completed_feature_caches: true
+  min_free_gb: 2
+training:
+  seed: 42
+  epochs: 100
+  effective_batch: 32
+  lr: 0.0001
+  weight_decay: 0.05
+  warmup_epochs: 5
+  eval_every: 1
+  patience: 10
+  min_delta: 0.0001
+  checkpoint_every: 10
+  keep_snapshots: 0
+  tensorboard: true
+evaluation:
+  boundaries: true
+  cache_frozen: true
+  representation_max_samples: 128
+  representation_interventions: true
+stages:
+  - id: pretrain
+    kind: mae
+    training:
+      epochs: 1600
+      patience: null
+      min_delta: 0.0
+      warmup_epochs: 40
+      betas: [0.9, 0.95]
+      eval_every: 25
+      checkpoint_every: 25
+      save_epochs: [0, 100, 200, 400, 800, 1200, 1600]
+  # Timeline heads are fitted only after SSL completes, from retained immutable snapshots.
+  - {id: repr_0000, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/epoch_0000'}
+  - {id: ef_linear_0000, kind: ef, mode: frozen_linear, source: '@pretrain/epoch_0000'}
+  - {id: seg_linear_0000, kind: seg, mode: frozen_linear, source: '@pretrain/epoch_0000'}
+  - {id: repr_0100, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/epoch_0100'}
+  - {id: repr_0200, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/epoch_0200'}
+  - {id: repr_0400, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/epoch_0400'}
+  - {id: ef_linear_0400, kind: ef, mode: frozen_linear, source: '@pretrain/epoch_0400'}
+  - {id: seg_linear_0400, kind: seg, mode: frozen_linear, source: '@pretrain/epoch_0400'}
+  - {id: repr_0800, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/epoch_0800'}
+  - {id: ef_linear_0800, kind: ef, mode: frozen_linear, source: '@pretrain/epoch_0800'}
+  - {id: seg_linear_0800, kind: seg, mode: frozen_linear, source: '@pretrain/epoch_0800'}
+  - {id: repr_1200, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/epoch_1200'}
+  - {id: repr_1600, kind: representation, mode: frozen_linear, readout_task: ef, source: '@pretrain/final'}
+  - {id: ef_linear_1600, kind: ef, mode: frozen_linear, source: '@pretrain/final'}
+  - {id: seg_linear_1600, kind: seg, mode: frozen_linear, source: '@pretrain/final'}
+  - {id: ef_lite, kind: ef, mode: frozen_lite, source: '@pretrain/final'}
+  - {id: seg_lite, kind: seg, mode: frozen_lite, source: '@pretrain/final'}
+  - id: ef_ft
+    kind: ef
+    mode: finetune
+    source: '@pretrain/final'
+    data:
+      augmentation: &task_augmentation
+        enabled: true
+        preset: A4_tgc_zoom_speckle
+        per_frame_random: false
+  - id: seg_ft
+    kind: seg
+    mode: finetune
+    source: '@pretrain/final'
+    data:
+      augmentation: *task_augmentation
+  - id: streaming
+    kind: streaming
+    source: '@pretrain/final'
+    audit: {max_frames: 512, max_cases: 2}
+  - {id: mechanisms, kind: mechanisms, source: '@pretrain/final'}

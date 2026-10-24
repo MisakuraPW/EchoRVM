@@ -170,7 +170,7 @@ def probe(request):
     exp.set_checkpointing(selection['gradient_checkpointing'])
     exp.train_mode()
     optimizer = torch.optim.AdamW([p for p in exp.model.parameters() if p.requires_grad], lr=cfg['training']['lr'],
-                                 weight_decay=cfg['training']['weight_decay'])
+                                 weight_decay=cfg['training']['weight_decay'], betas=tuple(cfg['training']['betas']))
     scaler = make_scaler(cfg, device)
     data = loader(exp.train, cfg, selection)
     iterator = iter(data)

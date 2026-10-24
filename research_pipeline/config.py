@@ -21,9 +21,9 @@ DEFAULTS = {
                 'probe_warmup_updates': 1, 'probe_updates': 2, 'probe_timeout_seconds': 240,
                 'memory_headroom_fraction': .1, 'memory_headroom_gb': .5,
                 'heartbeat_seconds': 15, 'loader_timeout_seconds': 180,
-                'cache_gb': 24, 'min_free_gb': 2},
+                'cache_gb': 24, 'min_free_gb': 2, 'evict_completed_feature_caches': False},
     'training': {'seed': 42, 'epochs': 100, 'effective_batch': 32, 'lr': .0001,
-                 'weight_decay': .05, 'warmup_epochs': 5, 'clip_norm': 1.,
+                 'weight_decay': .05, 'betas': [.9, .999], 'warmup_epochs': 5, 'clip_norm': 1.,
                  'eval_every': 1, 'patience': 10, 'min_delta': 0.,
                  'checkpoint_every': 10, 'keep_snapshots': 2, 'save_epochs': [],
                  'tensorboard': True},
@@ -73,8 +73,9 @@ def validate(config):
         source = stage.get('source')
         if isinstance(source, str) and source.startswith('@'):
             parts = source[1:].split('/')
-            if len(parts) != 2 or parts[0] not in known or parts[1] not in {'final', 'best'}:
-                raise ValueError('A source must name an earlier stage and final/best')
+            if (len(parts) != 2 or parts[0] not in known or
+                    (parts[1] not in {'final', 'best'} and not re.fullmatch(r'epoch_[0-9]{4}', parts[1]))):
+                raise ValueError('A source must name an earlier stage and final/best/epoch_NNNN')
         cfg = stage_config(config, stage)
         train, run = cfg['training'], cfg['runtime']
         for key in ('epochs', 'effective_batch', 'eval_every', 'checkpoint_every'):
@@ -84,10 +85,14 @@ def validate(config):
             raise ValueError('patience must be a positive number of validation checks or null')
         if kind == 'mae' and (train['patience'] is not None or train['eval_every'] < 1):
             raise ValueError('MAE must set training.patience: null; its epoch budget is fixed')
+        if train['keep_snapshots'] < 0 or any(not isinstance(n, int) or n < 0 for n in train['save_epochs']):
+            raise ValueError('Snapshot retention and pinned epochs must be nonnegative integers')
         if not 0 <= train['warmup_epochs'] <= train['epochs']:
             raise ValueError('warmup_epochs must be between zero and epochs')
         if train['lr'] <= 0 or train['weight_decay'] < 0 or train['min_delta'] < 0:
             raise ValueError('Invalid optimizer/early-stopping settings')
+        if len(train['betas']) != 2 or any(not 0 <= beta < 1 for beta in train['betas']):
+            raise ValueError('AdamW betas must lie in [0,1)')
         if run['precision'] not in {'fp32', 'fp16', 'bf16'}:
             raise ValueError('Use an explicit precision: fp32, fp16, bf16')
         if not 0 <= run['memory_headroom_fraction'] < 1 or min(run['cache_gb'], run['min_free_gb']) < 0:
@@ -148,6 +153,9 @@ def load(path, overrides=(), tag=None, root=None, smoke=False):
         for stage in config['stages']:
             stage.setdefault('training', {}).update(epochs=1, warmup_epochs=0, effective_batch=2)
             stage.setdefault('data', {}).update(limit_train=4, limit_val=2)
+            # Preserve the real initial baseline; map later timeline checkpoints to the smoke endpoint.
+            if isinstance(stage.get('source'), str) and re.search(r'/epoch_(?!0000)[0-9]{4}$', stage['source']):
+                stage['source'] = stage['source'].split('/')[0]+'/final'
             if stage['kind'] == 'streaming':
                 audit = stage.setdefault('audit', {})
                 audit['max_frames'] = min(audit.get('max_frames', 512), 8*config['data'].get('local_frames', 16))
