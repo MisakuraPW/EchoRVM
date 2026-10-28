@@ -28,6 +28,14 @@ Final actual-data/AdamW probes using loader-pinned inputs measured:
 
 These are short probes, not measured full epochs. Different probe batch sizes
 cover different numbers of windows, so compare full-epoch observations as well.
+The first three FULL epochs of the deployed trajectory subsequently measured
+105.76 / 98.58 / 102.16 seconds, with 10,030 windows per epoch and unchanged
+window-sequence hashes for matching epochs. Effective batch is 64. In the actual
+parent/worker CUDA environment, physical batch 64 failed the conservative 10%
+free-memory headroom criterion despite completing its stress update. The live
+selector therefore chose micro-batch 32, two accumulation chunks per update,
+two readers and four CPU threads. This is intentionally distinguished from the
+standalone 64-window probe; production is NOT claimed to reach 140 windows/s.
 A bounded torch.compile experiment exceeded its 240-second limit; it is NOT
 enabled in production. Its benchmark-only entry point remains explicitly opt-in.
 
