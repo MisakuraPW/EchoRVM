@@ -47,12 +47,14 @@ class ForwardTemporalMAE(FinalTemporalMAE):
             with torch.random.fork_rng(devices=[]):
                 self.content_writer = ContentWriter(self.embed_dim, int(config.get('writer_width', 64)))
 
-    def encode_current(self, clip, mask, previous):
+    def encode_current(self, clip, mask, previous, visible_indices=None):
         if self.forward_variant != 'mid_read':
-            return super().encode_current(clip, mask, previous)
+            return super().encode_current(clip, mask, previous, visible_indices=visible_indices)
         tokens = self.patch_embed(self._normalize_input(clip))
         tokens = tokens+self.pos_embed.to(tokens)
-        if mask is not None:
+        if visible_indices is not None:
+            tokens = tokens.gather(1, visible_indices[..., None].expand(-1, -1, self.embed_dim))
+        elif mask is not None:
             tokens = tokens[~mask].reshape(len(clip), -1, self.embed_dim)
         tokens = self.run_blocks(tokens, self.blocks[:self.read_after_block])
         if previous is not None:

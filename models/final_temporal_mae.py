@@ -185,9 +185,9 @@ class FinalTemporalMAE(TemporalMAE):
                 base = dense.reshape_as(base)
         return base, self.frame_transform(base, weights)
 
-    def _decode(self, encoded, mask, previous):
+    def _decode(self, encoded, mask, previous, visible_indices=None):
         if self.frame_readout == 'repeat':
-            return super()._decode(encoded, mask, previous)
+            return super()._decode(encoded, mask, previous, visible_indices=visible_indices)
         b = len(encoded)
         gt, gh, gw = self.token_grid
         dense = encoded.new_zeros(b, gt * gh * gw, self.embed_dim)
@@ -284,8 +284,8 @@ class FinalTemporalMAE(TemporalMAE):
                               local_frame_outputs=torch.cat(local_final, 1))
         return result
 
-    def encode_current(self, clip, mask, previous):
-        encoded, _ = self.encode_video(clip, mask)
+    def encode_current(self, clip, mask, previous, visible_indices=None):
+        encoded, _ = self.encode_video(clip, mask, visible_indices=visible_indices)
         raw = encoded
         if previous is not None and self.memory_read_location == 'tokens':
             encoded = self._call(self.feature_fusion, encoded, previous.to(encoded))

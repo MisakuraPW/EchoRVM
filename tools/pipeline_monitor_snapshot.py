@@ -70,4 +70,4 @@ def snapshot(root='/root/autodl-tmp/outputs_cr_clean', tag='cr_forward_v1', proj
 
 
 if __name__=='__main__':
-    print(json.dumps(snapshot(tag=os.environ.get('MAE_RUN_TAG', 'cr_forward_fast_v2')),ensure_ascii=False))
+    print(json.dumps(snapshot(tag=os.environ.get('MAE_RUN_TAG', 'cr_forward_fast_v3')),ensure_ascii=False))

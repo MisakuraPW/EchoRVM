@@ -1,4 +1,4 @@
-param([ValidatePattern('^[A-Za-z0-9_.-]+$')][string]$RunTag = 'cr_forward_fast_v2')
+param([ValidatePattern('^[A-Za-z0-9_.-]+$')][string]$RunTag = 'cr_forward_fast_v3')
 $ErrorActionPreference = 'Stop'
 $program = Get-Content -LiteralPath (Join-Path $PSScriptRoot '../tools/pipeline_monitor_snapshot.py') -Raw
 $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($program))

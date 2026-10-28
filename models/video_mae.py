@@ -202,12 +202,14 @@ class EchoVideoMAE(nn.Module):
         return mask
 
     def encode_video(
-        self, video: torch.Tensor, mask: torch.Tensor | None = None
+        self, video: torch.Tensor, mask: torch.Tensor | None = None, visible_indices: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         video = self._normalize_input(video)
         tokens = self.patch_embed(video)
         tokens = tokens + self.pos_embed.to(device=tokens.device, dtype=tokens.dtype)
-        if mask is not None:
+        if visible_indices is not None:
+            tokens = tokens.gather(1, visible_indices[..., None].expand(-1, -1, self.embed_dim))
+        elif mask is not None:
             tokens = tokens[~mask].reshape(video.shape[0], -1, self.embed_dim)
         tokens = self.run_blocks(tokens, self.blocks)
         return self.norm(tokens), mask

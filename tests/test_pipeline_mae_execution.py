@@ -1,11 +1,12 @@
 import copy
 import unittest
+from unittest import mock
 
 import torch
 
 from models.final_temporal_mae import FinalTemporalMAE
 from models.forward_temporal_mae import ForwardTemporalMAE
-from research_pipeline.mae_execution import active_clip_loss, supported
+from research_pipeline.mae_execution import active_clip_loss, supported, enable_compiled_clips
 from utils.final_temporal_training import deterministic_masks
 
 
@@ -54,6 +55,19 @@ class ActiveClipTests(unittest.TestCase):
     def test_random_mask_and_stochastic_layers_use_reference(self):
         model = torch.nn.Sequential(torch.nn.Dropout(.1))
         self.assertFalse(supported(model))
+
+    def test_execution_wrapper_keeps_state_dict_names(self):
+        model = FinalTemporalMAE(img_size=16, patch_size=8, local_frames=4, clip_count=2,
+                                 embed_dim=24, depth=1, num_heads=4, decoder_embed_dim=24,
+                                 decoder_depth=1, decoder_num_heads=4, in_chans=3, tubelet_size=2,
+                                 memory_mode='global', mask_ratio=.5, reconstruction_recent_frames=8)
+        names = list(model.state_dict())
+        sample = [dict(video=torch.rand(8, 3, 16, 16), record_index=4)]
+        expected = active_clip_loss(model, sample, 7)
+        with mock.patch('torch.compile', side_effect=lambda fn, **kw: fn):
+            enable_compiled_clips(model)
+        self.assertEqual(names, list(model.state_dict()))
+        torch.testing.assert_close(active_clip_loss(model, sample, 7), expected, rtol=0, atol=0)
 
 
 if __name__ == '__main__':

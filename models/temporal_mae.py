@@ -148,7 +148,7 @@ class TemporalMAE(EchoVideoMAE):
             return self.frame_expansion(features, valid)
         return features.repeat_interleave(self.tubelet_size, dim=1)
 
-    def _decode(self, encoded, mask, previous):
+    def _decode(self, encoded, mask, previous, visible_indices=None):
         b = encoded.shape[0]
         if self.frame_readout != 'repeat':
             # Expand only visible encoder tokens. Hidden pixels have no shortcut.
@@ -165,7 +165,10 @@ class TemporalMAE(EchoVideoMAE):
         else:
             decoded = self.decoder_embed(encoded)
             full = self.mask_token.to(decoded).expand(b, self.patch_embed.num_patches, -1).clone()
-            full[~mask] = decoded.reshape(-1, decoded.shape[-1])
+            if visible_indices is None:
+                full[~mask] = decoded.reshape(-1, decoded.shape[-1])
+            else:
+                full = full.scatter(1, visible_indices[..., None].expand(-1, -1, decoded.shape[-1]), decoded)
             pos = self.decoder_pos_embed.to(full)
         full = full + pos
         if previous is not None:

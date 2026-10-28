@@ -65,7 +65,8 @@ def build_plan(base, endpoint=None, with_w=False, baseline_result=None, confirm_
         scientific = dict(forward_variant='mid_read',read_after_block=6) if variant=='A' else dict(forward_variant='content_write',writer_width=64)
         training = copy.deepcopy(train)
         training.update(schedule_epochs=n,run_until_epoch=endpoint,save_epochs=sorted({0,k1,k2,n}))
-        cfg['stages'].append(dict(id=variant,kind='mae',source=b0(0),model=dict(overrides=scientific),training=training))
+        cfg['stages'].append(dict(id=variant,kind='mae',source=b0(0),model=dict(overrides=scientific),training=training,
+                                 runtime=copy.deepcopy(baseline.get('runtime', {}))))
         enabled = variant=='A' or with_w
         if enabled:
             selected.append(variant)

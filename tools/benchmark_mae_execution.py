@@ -22,6 +22,8 @@ def main():
     parser.add_argument('--output', required=True)
     parser.add_argument('--batch', type=int, default=8)
     parser.add_argument('--threads', type=int, default=1)
+    parser.add_argument('--profile', action='store_true')
+    parser.add_argument('--compile', action='store_true')
     args = parser.parse_args()
     request = json.loads(Path(args.request).read_text())
     cfg = request.get('config', request)
@@ -33,6 +35,11 @@ def main():
     exp.set_checkpointing(False)
     ids = torch.randperm(len(exp.train), generator=torch.Generator().manual_seed(cfg['training']['seed'])).tolist()
     samples = [exp.train[i] for i in ids[:args.batch]]
+    if device.type == 'cuda':
+        samples = [dict(s, video=s['video'].pin_memory()) for s in samples]
+    if args.compile:
+        from research_pipeline.mae_execution import enable_compiled_clips
+        enable_compiled_clips(exp.model)
     seed = exp.seed
 
     def reference():
@@ -71,6 +78,17 @@ def main():
         gradients = current
     report['speedup'] = report['reference']['seconds']/report['active']['seconds']
     report['relative_loss_error'] = abs(report['active']['loss']-report['reference']['loss'])/max(abs(report['reference']['loss']), 1e-12)
+    if args.profile:
+        exp.model.zero_grad(set_to_none=True)
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                              torch.profiler.ProfilerActivity.CUDA], record_shapes=True) as profile:
+            with amp_context(cfg, device):
+                active_clip_loss(exp.model, samples, seed).backward()
+        values = [dict(name=e.key, count=e.count, cpu_us=e.self_cpu_time_total,
+                       cuda_us=e.self_device_time_total) for e in profile.key_averages()]
+        report['profile_cpu'] = sorted(values, key=lambda e: e['cpu_us'], reverse=True)[:15]
+        report['profile_cuda'] = sorted(values, key=lambda e: e['cuda_us'], reverse=True)[:15]
+        report['profile_sync'] = [e for e in values if any(s in e['name'].lower() for s in ('nonzero', 'synchronize', 'memcpy'))]
     # BF16 regrouping is not bitwise identical, but gross semantic mismatches must fail closed.
     report['passed'] = report['relative_loss_error'] < .005 and report['relative_gradient_l2'] < .05
     write_json(Path(args.output), report)

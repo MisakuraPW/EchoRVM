@@ -1,5 +1,57 @@
 # Clip-Recurrent Execution Repair, 2026-10-29
 
+## Second Pass: Profiling and Larger Batch
+
+`cr_forward_fast_v2` completed epoch 3 and saved full recovery state (942 updates)
+before the authorized stop. Its first two epochs took 176.36/183.96 seconds.
+
+The user explicitly authorized effective batches above 32. Before the indexed
+repair, batch 32/64 achieved 62.53/64.01 windows/s; batch 128 OOMed on the longest
+192-frame real-window stress pass. Merely doubling batch was not enough then.
+
+Profiling identified 76 `nonzero` calls, 105 stream synchronizations and pageable
+per-clip CPU concatenations in one 32-window forward/backward. Fixed-size,
+ascending visible-token indices now use gather/scatter; complete real windows
+are transferred from loader-pinned storage once, with clip stacking on-device.
+For global mean memory, the visible-token mean replaces dense zero scattering.
+The reference evaluation path and all parameter names stay available/unchanged.
+Losses, gradients and AdamW steps match within declared floating-point tolerance.
+
+The 32-window indexed check achieved 88.22 windows/s versus 67.61 in the prior
+active path; `nonzero` count became zero and synchronizations fell to 29.
+Final actual-data/AdamW probes using loader-pinned inputs measured:
+
+| Physical = Effective Batch | Windows/s | Maximum Reserved Memory | Longest Stress Context |
+| --- | --- | --- | --- |
+| 32 | 104.10 | 10.42 GiB | 192 real frames |
+| 64 | 140.16 | 20.64 GiB | 192 real frames |
+
+These are short probes, not measured full epochs. Different probe batch sizes
+cover different numbers of windows, so compare full-epoch observations as well.
+A bounded torch.compile experiment exceeded its 240-second limit; it is NOT
+enabled in production. Its benchmark-only entry point remains explicitly opt-in.
+
+New trajectory: `cr_forward_fast_v3`. SSL effective batch is 64 for BOTH B0 and A,
+with LR unchanged. This changes optimizer update counts; it is not claimed to
+be bitwise or optimization-trajectory equivalent to batch 32. Both start freshly
+from the same declared initialization rather than mixing recipes mid-run. The
+old three epochs and weights remain untouched. Supervised heads retain their
+original effective batch. Per-model micro-batch safety tuning remains enabled,
+restricted to half/full batch, no recomputation, and 0/2 readers. It can reduce
+micro-batch without changing the now-fixed SSL effective batch of 64.
+
+`scripts/run_clip_recurrent_fast.sh all` calibrates once and launches the queue;
+`run` reuses a saved calibration, and repeated launches do not silently retune
+the scientific effective batch under an existing tag. Resume files are still
+overwritten once per epoch; pinned milestone snapshots remain unchanged.
+
+```bash
+tail -f /root/autodl-tmp/cr_forward_fast_v3.log
+python tools/watch_pipeline_progress.py --tag cr_forward_fast_v3
+```
+
+The remaining sections document the earlier repair, not the current run tag.
+
 ## Failure and Evidence
 
 - Old run: `cr_forward_v1`, original cloud code `fd75069`.
