@@ -292,6 +292,8 @@ def build(config, stage, source, device):
         native = model.get('config')
         if not native:
             raise ValueError('Provide model.config for initialization or a native checkpoint source')
+        if native.get('forward_variant'):
+            raise ValueError('Candidates must explicitly copy shared tensors from a B0 epoch-0 checkpoint')
         backbone, report = FinalTemporalMAE(**native), dict(initialization='random, explicitly configured')
         if model.get('init_checkpoint'):
             from utils.pretrained_init import load_videomae_init
@@ -340,6 +342,9 @@ def build(config, stage, source, device):
                                 stage.get('head_dim', 64), stage.get('head_depth', 2), stage.get('head_heads', 4))
     metadata = dict(dataset='EchoNet-Dynamic', manifest_sha256=digest(manifest),
                     native_config=native, initialization=report, checkpointing=True,
+                    feature_exit=dict(name=stage.get('exit_name', 'final'), layer=len((backbone.backbone if isinstance(backbone, TemporalTask) else backbone).blocks),
+                                      norm='final encoder norm', history_read_before_exit=native.get('forward_variant') == 'mid_read' or stage.get('exit_name', 'final') not in {'local','local_final'},
+                                      local_exit_semantics='post-read final layer, NOT baseline H' if native.get('forward_variant') == 'mid_read' else 'history-free final-layer H'),
                     train_ids=sorted(train_ids), val_ids=sorted(val_ids),
                     train_excluded=train.excluded, val_excluded=val.excluded,
                     train_records_sha256=digest(train.records), val_records_sha256=digest(val.records),

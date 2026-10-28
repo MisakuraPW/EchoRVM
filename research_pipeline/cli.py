@@ -38,9 +38,15 @@ def source_path(cfg, stage):
     if value.startswith('@'):
         name, which = value[1:].split('/')
         directory = layout(cfg, name)['result']
-        if not verify_done(directory):
-            raise ValueError(f'Source stage not completed: {name}')
-        summary = json.loads((directory / 'summary.json').read_text(encoding='utf-8'))
+        if verify_done(directory):
+            summary = json.loads((directory / 'summary.json').read_text(encoding='utf-8'))
+        elif which.startswith('epoch_') and (directory / 'PAUSED.json').exists():
+            summary = json.loads((directory / 'available_checkpoints.json').read_text(encoding='utf-8'))
+            protocol = json.loads((directory / 'protocol.json').read_text(encoding='utf-8'))
+            if summary['identity'] != protocol['sha256']:
+                raise ValueError('Paused snapshot protocol mismatch')
+        else:
+            raise ValueError(f'Source stage not completed or requested snapshot unavailable: {name}/{which}')
         target = 'final.pt' if which == 'final' else summary['best_file'] if which == 'best' else which+'.pt'
         if target not in summary['checkpoints']:
             raise ValueError(f'Source checkpoint was not retained: {name}/{which}')
@@ -109,6 +115,9 @@ def work(request):
                 return legacy_audit(cfg, request.get('source'))
             if kind == 'representation':
                 return run_representation(cfg, request.get('source'))
+            if kind == 'forward_diagnostics':
+                from .forward_diagnostics import run_diagnostics
+                return run_diagnostics(cfg, request['source'])
             return run_training(cfg, request.get('source'))
         except BaseException as exc:
             write_json(output / 'status.json', dict(pid=os.getpid(), hostname=socket.gethostname(),
@@ -148,10 +157,17 @@ def report(config):
 def execute(config, only=None):
     root = layout(config)['result']
     root.mkdir(parents=True, exist_ok=True)
-    plan_sha = digest(config)
+    def plan_identity(value):
+        import copy
+        value = copy.deepcopy(value)
+        value['training'].pop('run_until_epoch', None)
+        for stage in value['stages']:
+            stage.get('training', {}).pop('run_until_epoch', None)
+        return digest(value)
+    plan_sha = plan_identity(config)
     with run_lock(root):
         path = root / 'plan.json'
-        if path.exists() and digest(json.loads(path.read_text(encoding='utf-8'))) != plan_sha:
+        if path.exists() and plan_identity(json.loads(path.read_text(encoding='utf-8'))) != plan_sha:
             raise ValueError('Run plan changed; do not silently resume a different experiment')
         write_json(path, config)
         selected = set(only or [s['id'] for s in config['stages']])
@@ -165,6 +181,8 @@ def execute(config, only=None):
             output.mkdir(parents=True, exist_ok=True)
             source = source_path(config, stage)
             cfg = stage_config(config, stage)
+            if cfg['stage'].get('heads'):
+                cfg['stage']['heads'] = {task:source_path(config,dict(source=value)) for task,value in cfg['stage']['heads'].items()}
             request = output / 'request.json'
             write_json(request, dict(config=cfg, source=source))
             print(f"========== {stage['id']} ({stage['kind']}/{stage.get('mode', '-')}) ==========", flush=True)
@@ -172,15 +190,17 @@ def execute(config, only=None):
             with (output / 'worker.log').open('a', encoding='utf-8') as log:
                 completed = subprocess.run([sys.executable, '-u', '-m', 'research_pipeline', '_worker', '--request', str(request)],
                                            cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
-            event(root / 'queue.jsonl', stage=stage['id'], state='done' if completed.returncode == 0 else 'failed',
+            state = 'paused_at_budget' if (output / 'PAUSED.json').exists() else 'done'
+            event(root / 'queue.jsonl', stage=stage['id'], state=state if completed.returncode == 0 else 'failed',
                   returncode=completed.returncode)
             if completed.returncode != 0:
                 raise RuntimeError(f"{stage['id']} failed; queue stopped. Inspect {output / 'worker.log'}. "
                                    'No later experiment started; rerun the same command after fixing the cause.')
-            if not verify_done(output):
+            if not verify_done(output) and not (output / 'PAUSED.json').exists():
                 raise RuntimeError('Worker exited successfully without verified results')
             report(config)
-        mark_done(root, ['comparison.json', 'comparison.csv', 'comparison.md']) if len(selected) == len(config['stages']) else None
+        if all(verify_done(layout(config,s['id'])['result']) for s in config['stages']):
+            mark_done(root, ['comparison.json', 'comparison.csv', 'comparison.md'])
 
 
 def status(root, tag):
@@ -200,6 +220,8 @@ def status(root, tag):
                 value['state'] = 'needs_inspection_stale_heartbeat_not_proof_of_deadlock'
         if verify_done(output):
             value['state'] = 'done'
+        elif (output / 'PAUSED.json').exists():
+            value['state'] = 'paused_at_budget'
         rows.append(value)
     return rows
 

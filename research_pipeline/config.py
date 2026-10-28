@@ -26,7 +26,7 @@ DEFAULTS = {
                  'weight_decay': .05, 'betas': [.9, .999], 'warmup_epochs': 5, 'clip_norm': 1.,
                  'eval_every': 1, 'patience': 10, 'min_delta': 0.,
                  'checkpoint_every': 10, 'keep_snapshots': 2, 'save_epochs': [],
-                 'tensorboard': True},
+                 'tensorboard': True, 'schedule_epochs': None, 'run_until_epoch': None},
     'evaluation': {'boundaries': False, 'bootstrap_repetitions': 2000,
                    'representation_max_samples': 128, 'representation_interventions': False, 'cache_frozen': True},
     'stages': [],
@@ -64,7 +64,7 @@ def validate(config):
         if name in known:
             raise ValueError(f'Duplicate stage: {name}')
         kind = stage.get('kind')
-        if kind not in {'mae', 'ef', 'seg', 'representation', 'streaming', 'mechanisms'}:
+        if kind not in {'mae', 'ef', 'seg', 'representation', 'streaming', 'mechanisms', 'forward_diagnostics'}:
             raise ValueError(f'Unsupported stage kind: {kind}')
         if kind == 'streaming' and set(stage.get('audit', {})) - {'max_frames', 'max_cases', 'atol', 'rtol'}:
             raise ValueError('Unsupported streaming audit override')
@@ -77,7 +77,18 @@ def validate(config):
                     (parts[1] not in {'final', 'best'} and not re.fullmatch(r'epoch_[0-9]{4}', parts[1]))):
                 raise ValueError('A source must name an earlier stage and final/best/epoch_NNNN')
         cfg = stage_config(config, stage)
+        for task, head_source in stage.get('heads', {}).items():
+            if task not in {'ef','seg'} or not isinstance(head_source,str):
+                raise ValueError('Diagnostic heads must name EF/seg checkpoint sources')
+            if head_source.startswith('@') and head_source[1:].split('/')[0] not in known:
+                raise ValueError('Diagnostic head must refer to an earlier fitted stage')
         train, run = cfg['training'], cfg['runtime']
+        schedule = train['schedule_epochs'] or train['epochs']
+        until = train['run_until_epoch'] if train['run_until_epoch'] is not None else schedule
+        if not isinstance(schedule, int) or not isinstance(until, int) or not 1 <= until <= schedule:
+            raise ValueError('Require 1 <= run_until_epoch <= schedule_epochs')
+        if kind != 'mae' and (train['schedule_epochs'] is not None or train['run_until_epoch'] is not None):
+            raise ValueError('Budget pause is an SSL-only execution control')
         for key in ('epochs', 'effective_batch', 'eval_every', 'checkpoint_every'):
             if not isinstance(train[key], int) or train[key] < 1:
                 raise ValueError(f'training.{key} must be a positive integer')
@@ -152,6 +163,7 @@ def load(path, overrides=(), tag=None, root=None, smoke=False):
         config['training'].update(epochs=1, warmup_epochs=0, effective_batch=2, tensorboard=False)
         for stage in config['stages']:
             stage.setdefault('training', {}).update(epochs=1, warmup_epochs=0, effective_batch=2)
+            stage['training'].update(schedule_epochs=None, run_until_epoch=None)
             stage.setdefault('data', {}).update(limit_train=4, limit_val=2)
             # Preserve the real initial baseline; map later timeline checkpoints to the smoke endpoint.
             if isinstance(stage.get('source'), str) and re.search(r'/epoch_(?!0000)[0-9]{4}$', stage['source']):

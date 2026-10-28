@@ -162,8 +162,9 @@ def run_training(cfg, source):
     beat(force=True, phase='initializing')
     exp = build_experiment(cfg, source, device)
     module = importlib.import_module(cfg['adapter'].split(':')[0])
+    scientific_training = {k:v for k,v in cfg['training'].items() if k != 'run_until_epoch'}
     identity = dict(version=1, adapter=cfg['adapter'], stage=cfg['stage'], data=cfg['data'], model=cfg['model'],
-                    training=cfg['training'], evaluation=cfg['evaluation'], precision=cfg['runtime']['precision'],
+                    training=scientific_training, evaluation=cfg['evaluation'], precision=cfg['runtime']['precision'],
                     source=file_hash(source) if source else None, inputs=exp.input_digests(),
                     code=code_identity([inspect.getfile(module)]))
     identity_sha = digest(identity)
@@ -193,7 +194,9 @@ def run_training(cfg, source):
     train = cfg['training']
     optimizer = torch.optim.AdamW(params, lr=train['lr'], weight_decay=train['weight_decay'], betas=tuple(train['betas']))
     per_epoch = math.ceil(len(exp.train)/train['effective_batch'])
-    total, warmup = train['epochs']*per_epoch, train['warmup_epochs']*per_epoch
+    schedule_epochs = train.get('schedule_epochs') or train['epochs']
+    run_until = train.get('run_until_epoch') or schedule_epochs
+    total, warmup = schedule_epochs*per_epoch, train['warmup_epochs']*per_epoch
 
     def schedule(step):
         if step < warmup:
@@ -223,6 +226,7 @@ def run_training(cfg, source):
         except ImportError:
             event(output / 'events.jsonl', phase='warning', message='TensorBoard unavailable; CSV/JSON monitoring remains active')
     event(output / 'events.jsonl', phase='resume' if resumed else 'start', epoch=progress['epoch'], selection=selection)
+    event(output / 'events.jsonl', phase='execution_budget', schedule_epochs=schedule_epochs, run_until_epoch=run_until)
     training_loader = validation_loader = None
 
     def weights(epoch):
@@ -234,6 +238,12 @@ def run_training(cfg, source):
                                optimizer=optimizer.state_dict(), scheduler=scheduler.state_dict(), scaler=scaler.state_dict(),
                                rng=get_rng_state(), progress=copy.deepcopy(progress), selection=selection),
                           last_path, min_free_gb=cfg['runtime']['min_free_gb'])
+
+    budget_pins_path = output / 'budget_snapshots.json'
+    budget_pins = set(json.loads(budget_pins_path.read_text()) if budget_pins_path.exists() else [])
+    if exp.task == 'mae' and run_until < schedule_epochs:
+        budget_pins.add(run_until)
+        write_json(budget_pins_path,sorted(budget_pins))
 
     try:
         if 0 in train['save_epochs'] and not (checkpoints / 'epoch_0000.pt').exists():
@@ -248,7 +258,10 @@ def run_training(cfg, source):
                 exp.preview(preview_samples, output / 'previews' / 'epoch_0000')
         if not resumed:
             save_last()
-        while progress['epoch'] < train['epochs'] and not progress['stopped']:
+        if progress['epoch'] > run_until:
+            raise ValueError('Budget is behind the durable checkpoint; no training rewind is permitted')
+        (output / 'PAUSED.json').unlink(missing_ok=True)
+        while progress['epoch'] < run_until and not progress['stopped']:
             epoch = progress['epoch']
             if hasattr(exp.train, 'set_epoch'):
                 exp.train.set_epoch(epoch)
@@ -334,7 +347,7 @@ def run_training(cfg, source):
                            train_peak_reserved_bytes=torch.cuda.max_memory_reserved(device))
             row.update({f'train_{name}': value/seen for name, value in monitor_sum.items()})
             improved, previous_best = False, progress['best_file']
-            evaluated = (epoch+1) % train['eval_every'] == 0 or epoch+1 == train['epochs']
+            evaluated = (epoch+1) % train['eval_every'] == 0 or epoch+1 == schedule_epochs
             if evaluated:
                 val_started = time.perf_counter()
                 val_loss, metrics, patients, observations = evaluate(exp, cfg, selection, beat, validation_loader)
@@ -351,17 +364,20 @@ def run_training(cfg, source):
                     progress['stopped'] = True
             progress['epoch'] = epoch+1
             progress['history'].append(row)
+            persistence_started = time.perf_counter()
             # Commit recovery metadata before pruning any previous best it references.
-            if improved or (epoch+1) % train['checkpoint_every'] == 0 or progress['stopped'] or epoch+1 == train['epochs']:
+            if improved or (epoch+1) % train['checkpoint_every'] == 0 or progress['stopped'] or epoch+1 == run_until:
                 beat(force=True, phase='checkpoint', epoch=epoch+1)
                 save_last()
                 if previous_best and previous_best != progress['best_file']:
                     (checkpoints / previous_best).unlink(missing_ok=True)
-            if (epoch+1) % train['checkpoint_every'] == 0 or epoch+1 in train['save_epochs']:
+            if (epoch+1) % train['checkpoint_every'] == 0 or epoch+1 in train['save_epochs'] or epoch+1 == run_until:
                 atomic_torch_save(weights(epoch+1), checkpoints / f'epoch_{epoch+1:04d}.pt', min_free_gb=cfg['runtime']['min_free_gb'])
-                unpinned = [p for p in sorted(checkpoints.glob('epoch_*.pt')) if int(p.stem.split('_')[-1]) not in train['save_epochs']]
+                unpinned = [p for p in sorted(checkpoints.glob('epoch_*.pt')) if int(p.stem.split('_')[-1]) not in {*train['save_epochs'], *budget_pins, run_until}]
                 for path in unpinned[:max(0, len(unpinned)-train['keep_snapshots'])]:
                     path.unlink()
+            event(output / 'events.jsonl', phase='persistence_timing', epoch=epoch+1,
+                  seconds=time.perf_counter()-persistence_started)
             csv_rows(output / 'metrics.csv', progress['history'])
             if evaluated:
                 publish_history(output, progress['history'], diagnostic)
@@ -374,6 +390,28 @@ def run_training(cfg, source):
                 for key, value in row.items():
                     if isinstance(value, (float, int)):
                         writer.add_scalar(key, value, progress['global_step'])
+        available = {p.name:dict(path=str(p), sha256=file_hash(p), bytes=p.stat().st_size)
+                     for p in checkpoints.glob('epoch_*.pt')}
+        write_json(output / 'available_checkpoints.json', dict(identity=identity_sha, epoch=progress['epoch'], checkpoints=available))
+        if exp.task == 'mae' and progress['epoch'] < schedule_epochs:
+            # Preserve the FULL budget-boundary recovery state even after last.pt advances.
+            durable = checkpoints / f'resume_epoch_{progress["epoch"]:04d}.pt'
+            if not durable.exists():
+                try:
+                    os.link(last_path,durable)
+                except OSError:
+                    import shutil
+                    if shutil.disk_usage(checkpoints).free < last_path.stat().st_size+cfg['runtime']['min_free_gb']*1024**3:
+                        raise OSError('Insufficient space to preserve the full budget-boundary recovery checkpoint')
+                    atomic_torch_save(torch.load(last_path,map_location='cpu',weights_only=False),durable,
+                                      min_free_gb=cfg['runtime']['min_free_gb'])
+            pause = dict(phase='paused_at_budget', epoch=progress['epoch'], schedule_epochs=schedule_epochs,
+                         global_step=progress['global_step'], resume=str(last_path),
+                         durable_budget_resume=dict(path=str(durable),sha256=file_hash(durable)),checkpoints=available)
+            write_json(output / 'PAUSED.json', pause)
+            publish_history(output, progress['history'], diagnostic)
+            beat(force=True, **pause)
+            return pause
         atomic_torch_save(weights(progress['epoch']), checkpoints / 'final.pt', min_free_gb=cfg['runtime']['min_free_gb'])
         selected_name = progress['best_file'] or 'final.pt'
         selected = torch.load(checkpoints / selected_name, map_location='cpu', weights_only=False)

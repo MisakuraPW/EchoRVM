@@ -39,6 +39,7 @@ docs/*
 !docs/pipeline_evaluation.md
 !docs/pipeline_sources_and_tradeoffs.md
 !docs/clip_recurrent_global_baseline.md
+!docs/clip_recurrent_forward_runbook.md
 docs/~$*.xlsx
 资料/
 

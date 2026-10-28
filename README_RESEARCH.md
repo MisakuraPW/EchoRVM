@@ -10,6 +10,7 @@
 | --- | --- |
 | [脚手架与运行指南](docs/pipeline_guide.md) | 启动、冒烟、自动调优、监控、恢复、存储、模型接入 |
 | [干净Clip-Recurrent长程基线](docs/clip_recurrent_global_baseline.md) | 全数据无标签SSL、1600轮、在线取窗、固定检查点与统一评测 |
+| [B0+D+A/W前向探索](docs/clip_recurrent_forward_runbook.md) | 固定日程预算暂停、路径/历史诊断、中层读取A与可选写入W |
 | [评测与证据协议](docs/pipeline_evaluation.md) | 冻结/FT、病例聚合、边界、表征分析、资源口径 |
 | [GitHub来源与取舍](docs/pipeline_sources_and_tradeoffs.md) | 看过哪些实现、借鉴内容、项目修改、收益与风险 |
 | [上一轮时域实验](docs/temporal_final_runbook.md) | 解释历史结果和已有机制实验，不是新项目默认启动器 |

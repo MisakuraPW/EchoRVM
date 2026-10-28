@@ -237,11 +237,8 @@ class FinalTemporalMAE(TemporalMAE):
             previous = state
             mask = (masks[:, i] if masks is not None else temporal_mask(b, self.token_grid, self.mask_ratio,
                      self.research_mask, video.device, i, order)) if reconstruct else None
-            encoded, _ = self.encode_video(clip, mask)
-            raw = encoded
-            if previous is not None and self.memory_read_location == 'tokens':
-                encoded = self._call(self.feature_fusion, encoded, previous.to(encoded))
-            pooled = self._pool(raw if self.memory_write_source == 'local' else encoded, mask, valid)
+            encoded, raw = self.encode_current(clip, mask, previous)
+            pooled = self.write_summary(raw if self.memory_write_source == 'local' else encoded, mask, valid, previous)
             if reconstruct and (i + 1) * self.local_frames > frames - suffix:
                 pred = self._decode(encoded, mask, previous)
                 target = tubelet_patchify(self._normalize_input(clip), self.tubelet_size, self.patch_size)
@@ -287,6 +284,16 @@ class FinalTemporalMAE(TemporalMAE):
                               local_frame_outputs=torch.cat(local_final, 1))
         return result
 
+    def encode_current(self, clip, mask, previous):
+        encoded, _ = self.encode_video(clip, mask)
+        raw = encoded
+        if previous is not None and self.memory_read_location == 'tokens':
+            encoded = self._call(self.feature_fusion, encoded, previous.to(encoded))
+        return encoded, raw
+
+    def write_summary(self, encoded, mask, valid, previous):
+        return self._pool(encoded, mask, valid)
+
     def stream_clip(self, video, state=None, short_state=None, frame_valid=None):
         if video.shape[1] != self.local_frames:
             raise ValueError('stream_clip needs one complete local clip')
@@ -319,7 +326,11 @@ def load_final_model(path, overrides=None, seed=42):
     cfg.update(name='temporal_final', allow_variable_context=True)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        model = FinalTemporalMAE(**cfg)
+        if cfg.get('forward_variant'):
+            from .forward_temporal_mae import ForwardTemporalMAE
+            model = ForwardTemporalMAE(**cfg)
+        else:
+            model = FinalTemporalMAE(**cfg)
     target = model.state_dict()
     loaded, discarded = {}, []
     for key, tensor in state.items():
@@ -333,9 +344,13 @@ def load_final_model(path, overrides=None, seed=42):
     missing = set(target) - set(loaded)
     permitted = ('memory_type', 'frame_gamma', 'frame_expansion.basis', 'frame_expansion.coefficients.',
                  'memory.candidate_down.', 'memory.candidate_up.')
+    if cfg.get('forward_variant') == 'content_write':
+        permitted += ('content_writer.',)
     bad_missing = [k for k in missing if not k.startswith(permitted)]
     if discarded or bad_missing:
         raise ValueError(f'Unexpected warm-start mismatch: missing={bad_missing}, discarded={discarded}')
     model.load_state_dict(loaded, strict=False)
+    if any(not torch.equal(model.state_dict()[key].cpu(), tensor.cpu()) for key, tensor in loaded.items()):
+        raise ValueError('Shared initialization tensor verification failed')
     return model, config, dict(source_epoch=value.get('epoch'), loaded_tensors=len(loaded),
                                 initialized_keys=sorted(missing), discarded_keys=discarded)
