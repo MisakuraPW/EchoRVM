@@ -13,7 +13,7 @@ SSH config edits. A lost connection fails visibly; a later call can reconnect
 with the key. Do not blindly retry state-changing commands.
 
 ```powershell
-& ./scripts/Get-MaeMonitor.ps1
+& ./scripts/Get-MaeMonitor.ps1 -RunTag cr_forward_fast_v2
 # Optional explicit close, not needed during active monitoring:
 & ./scripts/mae_ssh.ps1 -Close
 ```
@@ -21,17 +21,17 @@ with the key. Do not blindly retry state-changing commands.
 The result is an outer JSON response (`exit_code`, `output`), with a JSON snapshot
 inside `output`. It includes project-scoped processes, queue events, current stage
 heartbeat/log tail, recent epochs, GPU and disk. It does not load model weights
-or dataset pixels. Defaults are the currently authorized `cr_forward_v1` run,
+or dataset pixels. Defaults are the currently authorized `cr_forward_fast_v2` run,
 its smoke run, `/root/autodl-tmp/EchoRVM`, and `outputs_cr_clean` on AutoDL.
 
-The app automation `mae` uses GPT-6 Luna / Low every ten minutes. It only reads
-this snapshot and updates ignored `outputs/monitor/cr_forward_v1/watch_state.json`.
-New actionable anomalies go to the authorized main chat; healthy checks remain
-silent and each independent automation chat calls the archive tool. The prompt
-explicitly forbids archiving the main chat, changing training, restarting,
-pulling code, touching other projects, or treating a budget pause as failure.
-Repeated alerts are deduplicated. Completed runs are confirmed twice before
-the automation pauses itself.
+The app cron automation `mae` is PAUSED as of 2026-10-29. Its two visible run chats
+were explicitly archived. One scheduled run performed no inspection; another
+could not access the local named pipe, and neither actually called the archive
+tool. A prompt promising automatic archiving is not a verified implementation.
+Do not reactivate this cron configuration or claim it is monitoring training.
+Manual snapshots remain available. An existing-thread heartbeat avoids separate
+run chats, but does not provide this cron's per-run cheap-model override; that
+tradeoff must be agreed before replacing the monitor.
 
 This is a local app automation, not a daemon on AutoDL. The Windows computer
 and Codex app must remain running; SSH access and tool permissions must remain
@@ -50,7 +50,7 @@ standalone stdlib viewer in a second SSH terminal instead. It only reads output
 files and can live outside the checkout to avoid changing a locked code hash:
 
 ```bash
-python /root/autodl-tmp/mae_progress_watch.py --tag cr_forward_v1
+python tools/watch_pipeline_progress.py --tag cr_forward_fast_v2
 ```
 
 Ctrl+C closes this separate viewer only. It does not signal the training worker.
