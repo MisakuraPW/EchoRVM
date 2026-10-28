@@ -37,3 +37,24 @@ This is a local app automation, not a daemon on AutoDL. The Windows computer
 and Codex app must remain running; SSH access and tool permissions must remain
 available. Creation confirms configuration, not that all future runs are
 guaranteed to succeed. The initial manual snapshot and channel reuse were tested.
+
+## Live terminal progress
+
+Future queue launches display a stage counter and a read-only status line every
+ten seconds (epoch/sample progress, loss, throughput, epoch ETA, memory, data wait,
+heartbeat and last validation metrics). Full stdout remains in `worker.log`;
+worker failures also print the recent log tail to the launching terminal.
+
+An already running parent cannot import this display retroactively. Use the
+standalone stdlib viewer in a second SSH terminal instead. It only reads output
+files and can live outside the checkout to avoid changing a locked code hash:
+
+```bash
+python /root/autodl-tmp/mae_progress_watch.py --tag cr_forward_v1
+```
+
+Ctrl+C closes this separate viewer only. It does not signal the training worker.
+Heartbeat frequency is fifteen seconds; polling faster does not invent per-step
+updates. ETA is approximate for the current epoch, not the whole multi-stage run.
+On older runs without the selection sidecar, the viewer intentionally omits a
+total stage count instead of guessing from disabled/future stages in the plan.

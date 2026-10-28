@@ -174,6 +174,9 @@ def execute(config, only=None):
         unknown = selected - {s['id'] for s in config['stages']}
         if unknown:
             raise ValueError(f'Unknown selected stages: {unknown}')
+        ordered = [s['id'] for s in config['stages'] if s['id'] in selected]
+        write_json(root/'execution_selection.json',dict(stages=ordered))
+        from tools.watch_pipeline_progress import StageDisplay
         for stage in config['stages']:
             if stage['id'] not in selected:
                 continue
@@ -185,15 +188,18 @@ def execute(config, only=None):
                 cfg['stage']['heads'] = {task:source_path(config,dict(source=value)) for task,value in cfg['stage']['heads'].items()}
             request = output / 'request.json'
             write_json(request, dict(config=cfg, source=source))
-            print(f"========== {stage['id']} ({stage['kind']}/{stage.get('mode', '-')}) ==========", flush=True)
+            print(f"========== [{ordered.index(stage['id'])+1}/{len(ordered)}] {stage['id']} ({stage['kind']}/{stage.get('mode', '-')}) ==========", flush=True)
+            print(f"Live progress below; full worker log: {output / 'worker.log'}",flush=True)
             event(root / 'queue.jsonl', stage=stage['id'], state='starting')
-            with (output / 'worker.log').open('a', encoding='utf-8') as log:
+            with (output / 'worker.log').open('a', encoding='utf-8') as log, StageDisplay(output,stage['id']):
                 completed = subprocess.run([sys.executable, '-u', '-m', 'research_pipeline', '_worker', '--request', str(request)],
                                            cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
             state = 'paused_at_budget' if (output / 'PAUSED.json').exists() else 'done'
             event(root / 'queue.jsonl', stage=stage['id'], state=state if completed.returncode == 0 else 'failed',
                   returncode=completed.returncode)
             if completed.returncode != 0:
+                from tools.watch_pipeline_progress import tail
+                print(tail(output/'worker.log',6000),flush=True)
                 raise RuntimeError(f"{stage['id']} failed; queue stopped. Inspect {output / 'worker.log'}. "
                                    'No later experiment started; rerun the same command after fixing the cause.')
             if not verify_done(output) and not (output / 'PAUSED.json').exists():

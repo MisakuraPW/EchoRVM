@@ -329,7 +329,8 @@ def run_training(cfg, source):
                 window_size = min(effective, len(exp.train)-seen)
                 elapsed = time.perf_counter()-begin
                 beat(phase='training', epoch=epoch+1, epochs=train['epochs'], completed=seen, total=len(exp.train),
-                     loss=loss_sum/seen, successful_updates=progress['global_step'], samples_per_second=seen/elapsed,
+                     loss=loss_sum/seen, lr=optimizer.param_groups[0]['lr'],
+                     successful_updates=progress['global_step'], samples_per_second=seen/elapsed,
                      data_wait_fraction=wait_sum/elapsed,
                      allocated_bytes=torch.cuda.memory_allocated(device) if device.type == 'cuda' else 0,
                      reserved_bytes=torch.cuda.memory_reserved(device) if device.type == 'cuda' else 0)
