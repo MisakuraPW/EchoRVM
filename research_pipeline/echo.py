@@ -134,6 +134,11 @@ class EchoExperiment(Experiment):
 
     def loss(self, samples):
         if self.task == 'mae':
+            from .mae_execution import active_clip_loss, supported
+            if supported(self.model):
+                epoch = self.train.dataset.epoch.value if self.model.training else 0
+                seed = self.seed + (int(epoch)*1000003 if self.model.training else 9173)
+                return active_clip_loss(self.model, samples, seed)
             groups = defaultdict(list)
             for sample in samples:
                 groups[len(sample['video'])].append(sample)

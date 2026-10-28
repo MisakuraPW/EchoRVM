@@ -208,8 +208,7 @@ class EchoVideoMAE(nn.Module):
         tokens = self.patch_embed(video)
         tokens = tokens + self.pos_embed.to(device=tokens.device, dtype=tokens.dtype)
         if mask is not None:
-            visible_count = int((~mask[0]).sum().item())
-            tokens = tokens[~mask].reshape(video.shape[0], visible_count, self.embed_dim)
+            tokens = tokens[~mask].reshape(video.shape[0], -1, self.embed_dim)
         tokens = self.run_blocks(tokens, self.blocks)
         return self.norm(tokens), mask
 

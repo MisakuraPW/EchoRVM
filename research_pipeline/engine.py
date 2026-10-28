@@ -187,6 +187,7 @@ def run_training(cfg, source):
     if resumed and resumed['selection'] != selection:
         raise ValueError('Exact epoch-boundary resume requires the saved execution grouping')
     exp.model.to(device)
+    torch.set_num_threads(selection.get('threads', cfg['runtime']['threads']))
     exp.set_checkpointing(selection['gradient_checkpointing'])
     params = [p for p in exp.model.parameters() if p.requires_grad]
     if not params:
@@ -367,7 +368,7 @@ def run_training(cfg, source):
             progress['history'].append(row)
             persistence_started = time.perf_counter()
             # Commit recovery metadata before pruning any previous best it references.
-            if improved or (epoch+1) % train['checkpoint_every'] == 0 or progress['stopped'] or epoch+1 == run_until:
+            if improved or (epoch+1) % train['resume_every'] == 0 or progress['stopped'] or epoch+1 == run_until:
                 beat(force=True, phase='checkpoint', epoch=epoch+1)
                 save_last()
                 if previous_best and previous_best != progress['best_file']:

@@ -18,14 +18,15 @@ DEFAULTS = {
                 'batch_candidates': [1, 2, 4, 8, 16, 32, 64],
                 'worker_candidates': [0, 2, 4, 8], 'checkpoint_candidates': [False, True],
                 'precision': 'fp32', 'prefetch_factor': 2, 'threads': 2,
-                'probe_warmup_updates': 1, 'probe_updates': 2, 'probe_timeout_seconds': 240,
+                'probe_warmup_updates': 2, 'probe_updates': 6, 'probe_timeout_seconds': 240,
+                'thread_candidates': [1, 2, 4],
                 'memory_headroom_fraction': .1, 'memory_headroom_gb': .5,
                 'heartbeat_seconds': 15, 'loader_timeout_seconds': 180,
                 'cache_gb': 24, 'min_free_gb': 2, 'evict_completed_feature_caches': False},
     'training': {'seed': 42, 'epochs': 100, 'effective_batch': 32, 'lr': .0001,
                  'weight_decay': .05, 'betas': [.9, .999], 'warmup_epochs': 5, 'clip_norm': 1.,
                  'eval_every': 1, 'patience': 10, 'min_delta': 0.,
-                 'checkpoint_every': 10, 'keep_snapshots': 2, 'save_epochs': [],
+                 'checkpoint_every': 10, 'resume_every': 1, 'keep_snapshots': 2, 'save_epochs': [],
                  'tensorboard': True, 'schedule_epochs': None, 'run_until_epoch': None},
     'evaluation': {'boundaries': False, 'bootstrap_repetitions': 2000,
                    'representation_max_samples': 128, 'representation_interventions': False, 'cache_frozen': True},
@@ -89,7 +90,7 @@ def validate(config):
             raise ValueError('Require 1 <= run_until_epoch <= schedule_epochs')
         if kind != 'mae' and (train['schedule_epochs'] is not None or train['run_until_epoch'] is not None):
             raise ValueError('Budget pause is an SSL-only execution control')
-        for key in ('epochs', 'effective_batch', 'eval_every', 'checkpoint_every'):
+        for key in ('epochs', 'effective_batch', 'eval_every', 'checkpoint_every', 'resume_every'):
             if not isinstance(train[key], int) or train[key] < 1:
                 raise ValueError(f'training.{key} must be a positive integer')
         if train['patience'] is not None and (not isinstance(train['patience'], int) or train['patience'] < 1):
@@ -114,6 +115,8 @@ def validate(config):
             raise ValueError('Runtime candidate lists cannot be empty')
         if any(not isinstance(n, int) or n < 1 for n in run['batch_candidates']):
             raise ValueError('Batch candidates must be positive integers')
+        if not run['thread_candidates'] or any(not isinstance(n, int) or n < 1 for n in run['thread_candidates']):
+            raise ValueError('Thread candidates must be positive integers')
         known.add(name)
     if not known:
         raise ValueError('No stages configured')

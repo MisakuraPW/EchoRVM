@@ -149,6 +149,9 @@ def select_runtime(cfg, experiment, directory, source, identity, heartbeat):
             if trials[-1]['status'] == 'oom':
                 break
     best = choose(trials)['selection']
+    for threads in sorted(set(run['thread_candidates'])):
+        attempt(dict(best, threads=threads))
+    best = choose(trials)['selection']
     for workers in sorted(set(run['worker_candidates']) - {0}):
         attempt(dict(best, num_workers=workers))
     selected = choose(trials)['selection']
@@ -162,6 +165,7 @@ def probe(request):
     from .engine import build_experiment, prepare_features, amp_context, make_scaler, update_step
     from utils.seed import seed_everything
     cfg, selection = request['config'], request['selection']
+    torch.set_num_threads(selection.get('threads', cfg['runtime']['threads']))
     device = torch.device(cfg['runtime']['device'])
     seed_everything(cfg['training']['seed'])
     exp = build_experiment(cfg, request.get('source'), device)

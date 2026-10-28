@@ -22,8 +22,8 @@ def configure(config):
     multiprocessing.set_start_method('spawn', force=True)
     import torch
     torch.set_num_threads(config['runtime']['threads'])
-    os.environ.setdefault('OMP_NUM_THREADS', str(config['runtime']['threads']))
-    os.environ.setdefault('MKL_NUM_THREADS', str(config['runtime']['threads']))
+    os.environ['OMP_NUM_THREADS'] = str(config['runtime']['threads'])
+    os.environ['MKL_NUM_THREADS'] = str(config['runtime']['threads'])
     device = config['runtime']['device']
     if device.startswith('cuda') and not torch.cuda.is_available():
         raise RuntimeError('CUDA requested but unavailable; CPU smoke must explicitly set runtime.device=cpu')
