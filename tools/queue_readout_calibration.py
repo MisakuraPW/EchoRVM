@@ -8,6 +8,9 @@ import subprocess
 import sys
 import time
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
 
 def process_identity(pid):
     try:
@@ -23,7 +26,7 @@ def main():
     parser.add_argument('--previous-result', type=Path, required=True)
     parser.add_argument('--tag', default='cr_readout_calibration_20261101')
     args = parser.parse_args()
-    os.chdir(Path(__file__).resolve().parents[1])
+    os.chdir(ROOT)
     identity = process_identity(args.wait_pid)
     print(f'Waiting for queue pid={args.wait_pid}; no GPU allocation while waiting', flush=True)
     while identity is not None and process_identity(args.wait_pid) == identity:

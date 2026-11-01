@@ -1,4 +1,7 @@
 import tempfile
+import json
+import subprocess
+import sys
 from pathlib import Path
 import unittest
 from unittest.mock import patch
@@ -69,6 +72,16 @@ class ReadoutTests(unittest.TestCase):
             run_training(current, None)
             saved = torch.load(layout(cfg, current['stage']['id'])['ckpt']/'last.pt', weights_only=False)
             self.assertEqual(saved['optimizer']['param_groups'][0]['lr'], cfg['training']['lr'])
+
+    def test_launcher_file_entrypoint_outside_repository(self):
+        script = Path(__file__).resolve().parents[1]/'tools/queue_readout_calibration.py'
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, 'execution_selection.json').write_text(json.dumps(dict(stages=[])))
+            result = subprocess.run([sys.executable, str(script), '--wait-pid', '999999999',
+                                     '--previous-result', tmp], cwd=tmp, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Previous comparison missing', result.stderr)
+            self.assertNotIn('ModuleNotFoundError', result.stderr)
 
 
 if __name__ == '__main__':
