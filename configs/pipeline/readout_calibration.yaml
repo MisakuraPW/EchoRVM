@@ -1,0 +1,50 @@
+# Existing encoder only: two supervised FT jobs, no SSL or new data exposure.
+version: 1
+adapter: research_pipeline.readout_calibration:build
+run: {root: /root/autodl-tmp/outputs_cr_clean, tag: cr_readout_calibration_20261101}
+data:
+  manifest: /root/autodl-tmp/outputs_cr_clean/manifests/dynamic_train_val.json
+  local_frames: 16
+  recent_frames: 64
+  max_prefix: 128
+  prefix: null
+  seed: 42
+  val_positions: all
+  augmentation: {enabled: true, preset: A4_tgc_zoom_speckle, per_frame_random: false}
+model: {overrides: {}}
+runtime:
+  device: cuda
+  precision: bf16
+  autotune: true
+  batch_candidates: [1, 2, 4, 8, 16, 32]
+  worker_candidates: [0, 2, 4, 8]
+  checkpoint_candidates: [false, true]
+  cache_gb: 24
+  min_free_gb: 2
+training:
+  seed: 42
+  epochs: 100
+  effective_batch: 32
+  lr: 0.0001
+  lr_schedule: constant
+  warmup_epochs: 0
+  weight_decay: 0.0001
+  betas: [0.9, 0.999]
+  clip_norm: 1.0
+  eval_every: 1
+  patience: 10
+  min_delta: 0.0001
+  resume_every: 1
+  checkpoint_every: 10
+  keep_snapshots: 0
+evaluation: {boundaries: true, cache_frozen: true}
+stages:
+  - id: seg_decoder_transfer_ft
+    kind: seg
+    mode: finetune
+    source: /root/autodl-tmp/outputs_cr_clean/ckpt/cr_forward_fast_v3/pretrain/epoch_1600.pt
+  - id: ef_l1_ft
+    kind: ef
+    mode: finetune
+    source: /root/autodl-tmp/outputs_cr_clean/ckpt/cr_forward_fast_v3/pretrain/epoch_1600.pt
+    training: {lr: 0.00001}

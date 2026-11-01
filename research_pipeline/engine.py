@@ -202,6 +202,8 @@ def run_training(cfg, source):
     def schedule(step):
         if step < warmup:
             return (step+1)/max(1, warmup)
+        if train.get('lr_schedule', 'cosine') == 'constant':
+            return 1.
         return .5*(1+math.cos(math.pi*min(1., (step-warmup)/max(1, total-warmup))))
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, schedule)

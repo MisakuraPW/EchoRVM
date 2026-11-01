@@ -27,7 +27,8 @@ DEFAULTS = {
                  'weight_decay': .05, 'betas': [.9, .999], 'warmup_epochs': 5, 'clip_norm': 1.,
                  'eval_every': 1, 'patience': 10, 'min_delta': 0.,
                  'checkpoint_every': 10, 'resume_every': 1, 'keep_snapshots': 2, 'save_epochs': [],
-                 'tensorboard': True, 'schedule_epochs': None, 'run_until_epoch': None},
+                 'tensorboard': True, 'schedule_epochs': None, 'run_until_epoch': None,
+                 'lr_schedule': 'cosine'},
     'evaluation': {'boundaries': False, 'bootstrap_repetitions': 2000,
                    'representation_max_samples': 128, 'representation_interventions': False, 'cache_frozen': True},
     'stages': [],
@@ -84,6 +85,8 @@ def validate(config):
             if head_source.startswith('@') and head_source[1:].split('/')[0] not in known:
                 raise ValueError('Diagnostic head must refer to an earlier fitted stage')
         train, run = cfg['training'], cfg['runtime']
+        if train.get('lr_schedule', 'cosine') not in {'cosine', 'constant'}:
+            raise ValueError('lr_schedule must be cosine or constant')
         schedule = train['schedule_epochs'] or train['epochs']
         until = train['run_until_epoch'] if train['run_until_epoch'] is not None else schedule
         if not isinstance(schedule, int) or not isinstance(until, int) or not 1 <= until <= schedule:
