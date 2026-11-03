@@ -94,4 +94,21 @@ bash scripts/run_clip_recurrent_patch8.sh export
 
 新增CPU测试验证：400轮预算及smoke引用、不加载标签的全split单窗取样/短视频无补帧、真实patch16→8卷积迁移、14x14原生前向与递归梯度。真实云端GPU冒烟和执行参数必须由入口实测；CPU通过不代表已完成正式预训练或速度已知。
 
-2026-11-02：新增3项patch8测试与4项读出回归通过。独立云端快照`EchoRVM_patch8_fe6017a`的7阶段真实4090冒烟全部完成，根目录DONE已确认；结果位于`result/cr_patch8_w64_400_v1_smoke`。这是小数据一轮软件验证，不是400轮性能结果；正式训练及完整吞吐自动探测尚未启动。启动脚本规范化初始权重为绝对路径，避免同一权重用相对/绝对路径写入同tag而产生协议冲突。
+2026-11-02：新增3项patch8测试与4项读出回归通过。独立云端快照`EchoRVM_patch8_fe6017a`的7阶段真实4090冒烟全部完成，根目录DONE已确认；结果位于`result/cr_patch8_w64_400_v1_smoke`。这是小数据一轮软件验证，不是400轮性能结果。启动脚本规范化初始权重为绝对路径，避免同一权重用相对/绝对路径写入同tag而产生协议冲突。
+
+## 1600 轮正式档
+
+`PRETRAIN_EPOCHS=1600` 从原始 VideoMAE 权重开始训练，默认使用独立 tag
+`cr_patch8_w64_1600_v1`。保持 patch8、W64、有效 batch64、40 轮 warmup 和读出配方；
+余弦日程从一开始按 1600 轮计算，不续接已跑完余弦日程的 400 轮实验。预训练不早停，
+每轮覆盖恢复权重，保留 0/100/200/400/800/1200/1600 轮快照。终点表征、冻结探针和
+EF/分割全量微调都读取第 1600 轮；不会自动在每个中间快照训练下游任务。
+
+```bash
+PRETRAIN_EPOCHS=1600 bash scripts/run_clip_recurrent_patch8.sh plan
+PRETRAIN_EPOCHS=1600 bash scripts/run_clip_recurrent_patch8.sh run
+PRETRAIN_EPOCHS=1600 bash scripts/run_clip_recurrent_patch8.sh status
+```
+
+中断后使用相同配置与 tag 重新执行 `run`。结果与权重仍分别写入
+`/root/autodl-fs/outputs_cr_spatial/{result,ckpt}/cr_patch8_w64_1600_v1/`。
