@@ -112,3 +112,18 @@ PRETRAIN_EPOCHS=1600 bash scripts/run_clip_recurrent_patch8.sh status
 
 中断后使用相同配置与 tag 重新执行 `run`。结果与权重仍分别写入
 `/root/autodl-fs/outputs_cr_spatial/{result,ckpt}/cr_patch8_w64_1600_v1/`。
+
+## 已有快照的接续评估
+
+2026-11-05：仅增加本次1600轮轨迹的400/800轮冻结EF与分割探针，不新增MAE预训练，
+不重复1600轮探针，也不自动启动A候选。复用父队列plan中的模型、数据、探针训练和
+自动调优设置，使用独立tag `cr_patch8_w64_1600_v1_trajectory`。
+
+```bash
+python tools/run_patch8_trajectory.py --repo /root/autodl-tmp/EchoRVM
+```
+
+入口先等待父队列根目录DONE并校验其汇总文件；父队列明确失败则停止。
+接续状态在 `outputs_cr_spatial/followup/cr_patch8_w64_1600_v1_trajectory/status.json`，
+结果与权重仍按result/ckpt分离。独占锁防止重复启动。当前队列运行期间不要pull；
+可把该独立入口复制到仓库之外执行，不改当前运行代码及其哈希。
