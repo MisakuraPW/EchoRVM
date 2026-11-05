@@ -82,7 +82,7 @@ def _complete_trace(case, frame, recent, local, prefix=0):
 
 
 def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
-                   max_prefix=128, smoke=False, *, splits=('train', 'val')):
+                   max_prefix=128, smoke=False, *, splits=('train', 'val'), minimum_frames=None):
     """Audit TRAIN/VAL; smoke caps each split at eight eligible real videos.
 
     Short videos are excluded from W64, not by H128 availability. All official
@@ -93,6 +93,9 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
     splits = tuple(splits)
     if splits not in (('train', 'val'), ('test',)):
         raise ValueError('Use TRAIN/VAL development or explicit TEST-only evaluation')
+    minimum_frames = recent_frames if minimum_frames is None else minimum_frames
+    if not isinstance(minimum_frames, int) or not 1 <= minimum_frames <= recent_frames:
+        raise ValueError('minimum_frames must lie between one and recent_frames')
     _dimensions(recent_frames, local_frames, max_prefix)
     root = Path(root)
     filelist, tracefile = root / 'FileList.csv', root / 'VolumeTracings.csv'
@@ -181,7 +184,7 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
             case['source_fingerprint'] = _hash(provenance)
             case['declared_frames'] = (int(row['NumberOfFrames'])
                                        if pd.notna(row.get('NumberOfFrames')) else None)
-            if n < recent_frames:
+            if n < minimum_frames:
                 reasons['short_recent'] += 1
                 result['excluded'].append(dict(split=split, reason='short_recent', **case))
                 continue
@@ -196,6 +199,8 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
                              short_recent_cases=reasons['short_recent'],
                              warmup_excluded_traces=warmup, exclusion_counts=dict(reasons))
     result['counts'] = counts
+    if minimum_frames != recent_frames:
+        result['minimum_frames'] = minimum_frames
     for name, path in (('filelist', filelist), ('traces', tracefile)):
         if _file_provenance(path) != {k: v for k, v in metadata[name].items() if k != 'sha256'}:
             raise ValueError(f'Metadata changed while building manifest: {path}')

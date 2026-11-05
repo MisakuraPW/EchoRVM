@@ -41,7 +41,8 @@ def loader(dataset, cfg, selection, epoch=0, training=True):
     run, train = cfg['runtime'], cfg['training']
     workers = int(selection['num_workers'])
     options = dict(batch_sampler=UpdateBatchSampler(len(dataset), train['effective_batch'], selection['micro_batch'],
-                                                   train['seed'], epoch, training),
+                                                   train['seed'], epoch, training and
+                                                   getattr(getattr(dataset, 'dataset', dataset), 'shuffle_draws', True)),
                    num_workers=workers, pin_memory=str(run['device']).startswith('cuda'),
                    collate_fn=collate_samples, worker_init_fn=worker_init,
                    generator=torch.Generator().manual_seed(train['seed']+epoch))

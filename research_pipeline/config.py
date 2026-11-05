@@ -87,6 +87,10 @@ def validate(config):
         train, run = cfg['training'], cfg['runtime']
         if train.get('lr_schedule', 'cosine') not in {'cosine', 'constant'}:
             raise ValueError('lr_schedule must be cosine or constant')
+        if train.get('monitor', 'task') not in {'task', 'val_loss'}:
+            raise ValueError('monitor must be task or val_loss')
+        if not isinstance(train.get('min_epochs', 0), int) or train.get('min_epochs', 0) < 0:
+            raise ValueError('min_epochs must be a nonnegative integer')
         schedule = train['schedule_epochs'] or train['epochs']
         until = train['run_until_epoch'] if train['run_until_epoch'] is not None else schedule
         if not isinstance(schedule, int) or not isinstance(until, int) or not 1 <= until <= schedule:

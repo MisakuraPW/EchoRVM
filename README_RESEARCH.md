@@ -11,6 +11,7 @@
 | [脚手架与运行指南](docs/pipeline_guide.md) | 启动、冒烟、自动调优、监控、恢复、存储、模型接入 |
 | [干净Clip-Recurrent长程基线](docs/clip_recurrent_global_baseline.md) | 全数据无标签SSL、1600轮、在线取窗、固定检查点与统一评测 |
 | [patch8空间预算版](docs/clip_recurrent_patch8.md) | 14x14空间网格、单个W64窗口、400轮及终点评估，不覆盖旧轨迹 |
+| [分割差距第一关](docs/分割性能差距排查_第一关_实现与运行.md) | 无新增MAE预训练：补TEST、官方权重锚点、完整监督及同更新预算对照 |
 | [B0+D+A/W前向探索](docs/clip_recurrent_forward_runbook.md) | 固定日程预算暂停、路径/历史诊断、中层读取A与可选写入W |
 | [评测与证据协议](docs/pipeline_evaluation.md) | 冻结/FT、病例聚合、边界、表征分析、资源口径 |
 | [GitHub来源与取舍](docs/pipeline_sources_and_tradeoffs.md) | 看过哪些实现、借鉴内容、项目修改、收益与风险 |

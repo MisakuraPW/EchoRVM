@@ -181,6 +181,10 @@ class EchoExperiment(Experiment):
                                              source_frame=sample['target_frame'], class_id=1,
                                              spacing=sample.get('spacing'), boundaries=boundaries,
                                              target_position=int(sample['target_position']), sample_id=sample['sample_id']))
+        for row, sample in zip(rows, samples):
+            for key in ('coverage_kind', 'left_padding_frames'):
+                if key in sample:
+                    row[key] = sample[key]
         return rows
 
     def evaluate_batch(self, samples, boundaries=False):

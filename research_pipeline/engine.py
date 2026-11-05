@@ -171,10 +171,10 @@ def run_training(cfg, source):
     protocol_path = output / 'protocol.json'
     if protocol_path.exists() and json.loads(protocol_path.read_text(encoding='utf-8'))['sha256'] != identity_sha:
         raise ValueError('Scientific/code/data protocol changed under the same run tag; use a new run')
-    write_json(protocol_path, dict(sha256=identity_sha, protocol=identity, environment=provenance()))
     if verify_done(output):
         beat(force=True, phase='done', reused=True)
         return json.loads((output / 'summary.json').read_text(encoding='utf-8'))
+    write_json(protocol_path, dict(sha256=identity_sha, protocol=identity, environment=provenance()))
     last_path = checkpoints / 'last.pt'
     resumed = torch.load(last_path, map_location='cpu', weights_only=False) if last_path.exists() else None
     if resumed and resumed['identity'] != identity_sha:
@@ -357,14 +357,17 @@ def run_training(cfg, source):
                 val_loss, metrics, patients, observations = evaluate(exp, cfg, selection, beat, validation_loader)
                 row.update(val_loss=val_loss, val_seconds=time.perf_counter()-val_started,
                            **{f'val_{k}': v for k, v in metrics.items() if isinstance(v, (int, float))})
-                score = metrics['mae_pp'] if exp.task == 'ef' else -metrics['dice_mean'] if exp.task == 'seg' else val_loss
+                score = (val_loss if train.get('monitor') == 'val_loss' else
+                         metrics['mae_pp'] if exp.task == 'ef' else -metrics['dice_mean'] if exp.task == 'seg' else val_loss)
                 improved = exp.task != 'mae' and (progress['best'] is None or score < progress['best']-train['min_delta'])
                 if improved:
                     progress.update(best=score, best_epoch=epoch+1, best_file=f'best_epoch_{epoch+1:04d}.pt', bad_checks=0)
                     atomic_torch_save(weights(epoch+1), checkpoints / progress['best_file'], min_free_gb=cfg['runtime']['min_free_gb'])
                 elif exp.task != 'mae':
                     progress['bad_checks'] += 1
-                if exp.task != 'mae' and train['patience'] is not None and progress['bad_checks'] >= train['patience']:
+                if (exp.task != 'mae' and train['patience'] is not None
+                        and progress['bad_checks'] >= train['patience']
+                        and epoch+1 >= train.get('min_epochs', 0)):
                     progress['stopped'] = True
             progress['epoch'] = epoch+1
             progress['history'].append(row)
