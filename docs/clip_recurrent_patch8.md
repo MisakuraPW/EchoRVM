@@ -127,3 +127,16 @@ python tools/run_patch8_trajectory.py --repo /root/autodl-tmp/EchoRVM
 接续状态在 `outputs_cr_spatial/followup/cr_patch8_w64_1600_v1_trajectory/status.json`，
 结果与权重仍按result/ckpt分离。独占锁防止重复启动。当前队列运行期间不要pull；
 可把该独立入口复制到仓库之外执行，不改当前运行代码及其哈希。
+
+## TEST终点评估缺项修正
+
+原队列的DONE只表示TRAIN/VAL开发任务完成，不表示论文测试已完成。2026-11-05补充独立入口：
+
+```bash
+python tools/evaluate_patch8_test.py --tag cr_patch8_w64_1600_v1
+```
+
+只评估VAL锁定的分割和EF最佳FT权重，不训练、不以TEST选择epoch，输出到独立的
+`result/cr_patch8_w64_1600_v1_test/`。尚未进行真实GPU TEST执行，不能声称已经补测。
+SSL全split无标签暴露需在结果中披露。详见
+[本轮实验报告](Clip-Recurrent_patch8_1600轮实验报告_20261105.md)。

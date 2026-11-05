@@ -82,13 +82,17 @@ def _complete_trace(case, frame, recent, local, prefix=0):
 
 
 def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
-                   max_prefix=128, smoke=False):
+                   max_prefix=128, smoke=False, *, splits=('train', 'val')):
     """Audit TRAIN/VAL; smoke caps each split at eight eligible real videos.
 
     Short videos are excluded from W64, not by H128 availability. All official
     traces are kept on eligible cases; task-level warm-up exclusions are listed
-    separately. TEST video files are never opened. Duplicate IDs are fatal.
+    separately. Defaults never open TEST videos. Explicit splits=('test',)
+    builds an isolated evaluation manifest. Duplicate IDs are fatal.
     """
+    splits = tuple(splits)
+    if splits not in (('train', 'val'), ('test',)):
+        raise ValueError('Use TRAIN/VAL development or explicit TEST-only evaluation')
     _dimensions(recent_frames, local_frames, max_prefix)
     root = Path(root)
     filelist, tracefile = root / 'FileList.csv', root / 'VolumeTracings.csv'
@@ -108,7 +112,7 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
     if not {'FileName', 'Frame', *_POINT_COLUMNS}.issubset(traces.columns):
         raise ValueError('VolumeTracings.csv is missing official trace columns')
     traces['_patient'] = traces.FileName.map(lambda x: Path(str(x)).stem)
-    selected_ids = set(files.loc[files['_split'].isin(['train', 'val']), '_patient'])
+    selected_ids = set(files.loc[files['_split'].isin(splits), '_patient'])
     labels = defaultdict(list)
     for (patient, frame), group in traces[traces['_patient'].isin(selected_ids)].groupby(
             ['_patient', 'Frame'], sort=True):
@@ -122,8 +126,10 @@ def build_manifest(root, seed=42, recent_frames=64, local_frames=16,
     result = dict(version=2, seed=int(seed), root=str(root.resolve()),
                   recent_frames=int(recent_frames), local_frames=int(local_frames),
                   max_prefix=int(max_prefix), smoke=bool(smoke), train=[], val=[], excluded=[])
+    if splits == ('test',):
+        result['test'] = []
     counts = {}
-    for split in ('train', 'val'):
+    for split in splits:
         rows = files[files['_split'] == split].to_dict('records')
         rows.sort(key=lambda row: _hash([int(seed), split, row['_patient']]))
         reasons = Counter()
@@ -213,7 +219,8 @@ def _load_manifest(manifest):
         raise ValueError('Manifest hash mismatch')
     train = [r['patient'] for r in manifest['train']]
     val = [r['patient'] for r in manifest['val']]
-    if len(set(train + val)) != len(train + val):
+    test = [r['patient'] for r in manifest.get('test', [])]
+    if len(set(train + val + test)) != len(train + val + test):
         raise ValueError('Duplicate patients or train/val overlap')
     return manifest
 
@@ -264,9 +271,11 @@ class WindowDataset(Dataset):
 
     def __init__(self, manifest, split, task='ef', recent_frames=64, local_frames=16,
                  max_prefix=128, seed=42, training=False, positions='balanced',
-                 prefix=0, aug_cfg=None, limit=None, *, records=None):
+                 prefix=0, aug_cfg=None, limit=None, *, records=None, allow_test=False):
         _dimensions(recent_frames, local_frames, max_prefix)
-        if task not in ('ef', 'seg', 'mae') or split not in ('train', 'val'):
+        if split == 'test' and (not allow_test or training or aug_cfg is not None or task not in ('ef', 'seg')):
+            raise ValueError('TEST requires explicit evaluation-only access, no augmentation/training')
+        if task not in ('ef', 'seg', 'mae') or split not in ('train', 'val', 'test'):
             raise ValueError('Require task ef/seg/mae and split train/val; TEST is sealed')
         if positions not in ('balanced', 'all'):
             raise ValueError('positions must be balanced or all')
