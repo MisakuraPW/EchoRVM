@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 from pathlib import Path
 
@@ -131,7 +132,10 @@ def validate(config):
 
 
 def load(path, overrides=(), tag=None, root=None, smoke=False):
-    config = merge(DEFAULTS, yaml.safe_load(Path(path).read_text(encoding='utf-8')) or {})
+    path = Path(path)
+    raw = path.read_text(encoding='utf-8')
+    parsed = json.loads(raw) if path.suffix.lower() == '.json' else yaml.safe_load(raw)
+    config = merge(DEFAULTS, parsed or {})
     for expression in overrides:
         key, sep, value = expression.partition('=')
         if not sep:

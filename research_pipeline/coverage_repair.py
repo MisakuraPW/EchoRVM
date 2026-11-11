@@ -126,15 +126,27 @@ def evaluation_dataset(cfg, manifest, split, task):
 
 
 def build(config, stage, source, device):
-    if stage['kind'] != 'seg' or stage.get('mode') != 'finetune':
-        raise ValueError('Coverage repair requires segmentation full fine-tuning')
-    exp = build_spatial(config, stage, source, device)
+    mode = stage.get('mode')
+    if stage['kind'] != 'seg' or mode not in {'finetune', 'frozen_linear'}:
+        raise ValueError('Coverage repair requires segmentation FT or a frozen linear probe')
     data = config['data']
-    dataset = CoverageDataset(data['coverage_manifest'], 'train', training=True,
-                              aug_cfg=data.get('augmentation'), seed=data.get('seed', 42),
+    # Limit records after eligibility, not the first N videos before trace screening.
+    limits = {key:data[key] for key in ('limit_train','limit_val') if data.get(key) is not None}
+    reference = dict(config, data={key:value for key,value in data.items() if key not in limits})
+    exp = build_spatial(reference, stage, source, device)
+    if 'limit_val' in limits:
+        records = exp.val.dataset.records
+        exp.val.dataset.records = records[:limits['limit_val']]
+        exp.metadata.update(val_ids=sorted({r['patient'] for r in exp.val.dataset.records}),
+                            val_records_sha256=digest(exp.val.dataset.records))
+    finetune = mode == 'finetune'
+    dataset = CoverageDataset(data['coverage_manifest'], 'train', training=finetune,
+                              aug_cfg=data.get('augmentation') if finetune else None, seed=data.get('seed', 42),
                               positions='balanced')
-    draws = len(exp.train)
-    exp.train = IdentifiedDataset(DrawBudgetDataset(dataset, draws), 'train')
+    if data.get('limit_train') is not None:
+        dataset.records = dataset.records[:data['limit_train']]
+    draws = min(len(exp.train),limits.get('limit_train',len(exp.train))) if finetune else len(dataset)
+    exp.train = IdentifiedDataset(DrawBudgetDataset(dataset, draws) if finetune else dataset, 'train')
     exp.metadata['data_files'][str(data['coverage_manifest'])] = file_hash(data['coverage_manifest'])
     exp.metadata.update(train_ids=sorted({r['patient'] for r in dataset.records}),
                         train_records_sha256=digest(dataset.records),
@@ -142,7 +154,8 @@ def build(config, stage, source, device):
                         coverage=dict(policy='legacy positions unchanged; recovered frames use causal short context',
                                       unique_source_frames=len({(r['patient'], r['target_frame']) for r in dataset.records}),
                                       supervised_pool=len(dataset), draws_per_check=draws,
-                                      budget='same samples/optimizer-updates per validation check as legacy',
+                                      budget='same samples/optimizer-updates per validation check as legacy' if finetune
+                                             else 'one unaugmented window per available annotated frame per epoch',
                                       boundary='repeat first source frame only to complete earliest local clip',
                                       validation='unchanged common legacy cohort for selection'))
     return exp

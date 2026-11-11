@@ -95,6 +95,9 @@ def _head(model, checkpoint, task, recent, source):
 def run_diagnostics(cfg, source):
     rng = get_rng_state()
     try:
+        if cfg['stage'].get('audit_scope') == 'patch8_stage_a':
+            from .stage_a_diagnostics import run_panel
+            return run_panel(cfg, source)
         return _run_diagnostics(cfg,source)
     finally:
         set_rng_state(rng)
