@@ -1,5 +1,6 @@
 import copy
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from research_pipeline.forward_diagnostics import gradient_credit
 from test_final_temporal_data import fixture
 from test_research_pipeline_forward import native
 from tools.run_patch8_stage_a import build_plan, lock_selection, match_observations, read, smoke_config
+from tools import run_patch8_stage_a as runner
 from utils.final_temporal_data import build_manifest
 
 
@@ -122,6 +124,44 @@ class StageATests(unittest.TestCase):
             write_json(root/'b'/'observations.json',[dict(row,target_position=62)])
             with self.assertRaisesRegex(ValueError,'population'):
                 match_observations(root/'a',root/'b','seg')
+
+    def test_formal_run_tests_every_requested_arm_but_smoke_does_not(self):
+        ref = reference()
+        for action,extra,expected in [('run',[],['AR','AW']),('run',['--candidate','AW'],['AW']),
+                                      ('smoke',[],[])]:
+            with self.subTest(action=action,extra=extra), tempfile.TemporaryDirectory() as tmp:
+                args = ['stage_a',action,'--root',tmp,*extra]
+                with (mock.patch.object(sys,'argv',args), mock.patch.object(runner,'baseline',return_value=ref),
+                      mock.patch.object(runner,'execute') as fit, mock.patch.object(runner,'evaluate') as evaluate,
+                      mock.patch.object(runner,'compare'), mock.patch.object(runner,'test_arm') as test):
+                    runner.main()
+                self.assertEqual([c.args[2] for c in test.call_args_list],expected)
+                self.assertEqual([c.args[3] for c in evaluate.call_args_list],['val_full']*len(expected))
+                tags = [c.args[0]['run']['tag'] for c in fit.call_args_list]
+                if action=='run':
+                    self.assertEqual(tags,['patch8_stage_a_v1_B8',*['patch8_stage_a_v1_'+arm for arm in expected]])
+                else:
+                    self.assertEqual(tags,['patch8_stage_a_v1_AR_smoke','patch8_stage_a_v1_AW_smoke'])
+
+    def test_test_endpoints_lock_before_inference_and_do_not_overwrite_other_arms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ref = reference()
+            for arm in ('AR','AW'):
+                endpoints = {'B8':ref['ft'],arm:ref['ft']}
+                def evaluated(*args):
+                    self.assertEqual(set(read(root/f'{arm}_test_lock.json')['weights']),{'B8',arm})
+                with (mock.patch.object(runner,'file_hash',return_value='sha'),
+                      mock.patch.object(runner,'evaluate',side_effect=evaluated),
+                      mock.patch.object(runner,'completed',return_value={'checkpoint_sha256':'sha'}),
+                      mock.patch.object(runner,'match_observations') as matched,
+                      mock.patch.object(runner,'phase_metrics',return_value={}),
+                      mock.patch('utils.final_temporal_data.build_manifest',return_value={})):
+                    runner.test_endpoints(endpoints,[(ref['base'],list(runner.TASK_STAGES.values()))],
+                                          root,42,root,arm)
+                self.assertEqual(matched.call_count,2)
+                self.assertEqual(set(read(root/f'{arm}_test.json')),{'B8',arm})
+            self.assertTrue((root/'AR_test_lock.json').exists())
 
     def test_file_backed_candidate_smoke_ft_probes_and_panel(self):
         with tempfile.TemporaryDirectory() as tmp:

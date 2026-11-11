@@ -1,4 +1,4 @@
-"""Stage A: two independent fixed-400 schedules, matched FT, explicit TEST selection."""
+"""Stage A: fixed-400 schedules, matched FT, and automatic VAL-locked TEST."""
 
 import argparse
 import copy
@@ -268,6 +268,45 @@ def lock_selection(path, selection):
     write_json(path,selection)
 
 
+def test_endpoints(endpoints, jobs, data_root, seed, control, name):
+    from utils.final_temporal_data import build_manifest
+
+    weights = {arm:{task:file_hash(item[2]) for task,item in entries.items()}
+               for arm,entries in endpoints.items()}
+    lock_selection(control/f'{name}_test_lock.json',
+                   dict(weights=weights, selection='VAL-locked best weights; no TEST tuning'))
+    for cfg,stages in jobs:
+        evaluate(cfg,stages,data_root)
+    manifest = build_manifest(data_root,seed=seed,max_prefix=0,splits=('test',),minimum_frames=1)
+    dirs = {arm:{task:item[0].parent.with_name(item[0].parent.name+'_test')/item[0].name
+                 for task,item in entries.items()} for arm,entries in endpoints.items()}
+    report = {}
+    for arm,paths in dirs.items():
+        report[arm] = {task:completed(path) for task,path in paths.items()}
+        for task in paths:
+            if report[arm][task]['checkpoint_sha256'] != weights[arm][task]:
+                raise ValueError('TEST artifact does not match its VAL lock')
+            if arm!='B8':
+                match_observations(dirs['B8'][task],paths[task],task)
+        report[arm]['seg_phases'] = phase_metrics(paths['seg'],manifest,'test')
+    write_json(control/f'{name}_test.json',report)
+
+
+def task_endpoints(cfg):
+    return {task:locked_checkpoint(Path(cfg['run']['root']),cfg['run']['tag'],name)
+            for task,name in TASK_STAGES.items()}
+
+
+def test_arm(ref, cfg, arm, data_root, control):
+    endpoints = {'B8':ref['ft']}
+    jobs = [(ref['base'],[TASK_STAGES['ef']])]
+    if arm!='B8':
+        endpoints[arm] = task_endpoints(cfg)
+        jobs.append((cfg,list(TASK_STAGES.values())))
+    # B8 segmentation already has a verified TEST bound to its VAL checkpoint.
+    test_endpoints(endpoints,jobs,data_root,ref['base']['data']['seed'],control,arm)
+
+
 def smoke_config(config, cpu=False):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp)/'plan.json'
@@ -328,6 +367,7 @@ def main():
                 execute(cfg)
                 evaluate(cfg,[TASK_STAGES['seg']],args.data_root,'val_full')
                 compare(ref,plans,control,args.gap_root,args.coverage_tag)
+                test_arm(ref,cfg,arm,args.data_root,control)
             return
         result = compare(ref,plans,control,args.gap_root,args.coverage_tag)
         if args.action=='compare':
@@ -337,6 +377,7 @@ def main():
             raise ValueError('Both FT tasks and complete VAL must finish before selection')
         if args.action=='confirm':
             lock_selection(control/'confirmation_lock.json',dict(candidate=arm,seed=43))
+            confirmed = {}
             for name in ('B8',arm):
                 cfg = copy.deepcopy(plans[name])
                 source = ref['endpoint'] if name=='B8' else source_path(cfg,dict(source='@pretrain/epoch_0400'))
@@ -345,42 +386,15 @@ def main():
                 for stage in cfg['stages']:
                     stage['training']['seed'] = 43
                 execute(validate(cfg))
+                confirmed[name] = cfg
             a,b = [args.root/'result'/f'{args.tag}_{name}_confirm43' for name in ('B8',arm)]
             write_json(control/'confirmation_val.json',{task:summary_pair(a/name,b/name,task)
                                                          for task,name in TASK_STAGES.items()})
+            test_endpoints({name:task_endpoints(cfg) for name,cfg in confirmed.items()},
+                           [(cfg,list(TASK_STAGES.values())) for cfg in confirmed.values()],
+                           args.data_root,ref['base']['data']['seed'],control,'confirmation43')
             return
-        cfg = plans[arm]
-        selected = ref['ft'] if arm=='B8' else {
-            task:locked_checkpoint(args.root,cfg['run']['tag'],name) for task,name in TASK_STAGES.items()}
-        locked = {name:{task:file_hash(item[2]) for task,item in entries.items()}
-                  for name,entries in [('B8',ref['ft']),(arm,selected)]}
-        base_seg = ref['ft']['seg'][0]
-        base_seg_test = base_seg.parent.with_name(base_seg.parent.name+'_test')/base_seg.name
-        if completed(base_seg_test)['checkpoint_sha256'] != locked['B8']['seg']:
-            raise ValueError('Existing B8 full segmentation TEST does not bind the selected checkpoint')
-        lock_selection(control/('b8_test_lock.json' if arm=='B8' else 'candidate_test_lock.json'),
-                       dict(candidate=arm, weights=locked, selection='explicit VAL decision, no TEST tuning'))
-        evaluate(ref['base'],[TASK_STAGES['ef']],args.data_root)
-        if arm!='B8':
-            evaluate(cfg,list(TASK_STAGES.values()),args.data_root)
-        from utils.final_temporal_data import build_manifest
-        manifest = build_manifest(args.data_root, seed=ref['base']['data']['seed'],
-                                  max_prefix=0, splits=('test',), minimum_frames=1)
-        dirs = {'B8': {task:item[0].parent.with_name(item[0].parent.name+'_test')/item[0].name
-                       for task,item in ref['ft'].items()}}
-        if arm!='B8':
-            dirs[arm] = {task:layout(cfg)['result'].with_name(cfg['run']['tag']+'_test')/name
-                         for task,name in TASK_STAGES.items()}
-            for task in TASK_STAGES:
-                match_observations(dirs['B8'][task],dirs[arm][task],task)
-        report = {}
-        for name,paths in dirs.items():
-            report[name] = {task:completed(path) for task,path in paths.items()}
-            for task in paths:
-                if report[name][task]['checkpoint_sha256'] != locked[name][task]:
-                    raise ValueError('TEST artifact does not match its VAL lock')
-            report[name]['seg_phases'] = phase_metrics(paths['seg'],manifest,'test')
-        write_json(control/f'{arm}_test.json',report)
+        test_arm(ref,plans[arm],arm,args.data_root,control)
 
 
 if __name__=='__main__':

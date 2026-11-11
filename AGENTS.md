@@ -1,5 +1,6 @@
 # Project delivery workflow
 
+- Formal experiment entry points must run applicable TEST evaluation by default for every trained comparison arm, using checkpoints selected and locked on VAL. Smoke, planning, and report-only commands must not open TEST labels. Do not use TEST for tuning or checkpoint selection.
 - Use a single agent for this project by default. Do not spawn subagents or introduce multi-agent implementation/review unless the user explicitly requests it.
 - The user has authorized automatic commits and pushes for completed code changes in this project. After implementing and verifying a code change, commit the task-scoped files and push the current branch to its configured upstream without requiring another reminder.
 - Inspect the working tree and index first. Preserve unrelated edits and staged work; never include them implicitly in a task commit.

@@ -24,23 +24,25 @@ bash scripts/run_patch8_stage_a.sh run
 
 - `plan` 核验历史B8来源、同源400轮FT、分割覆盖14920真帧/8108抽样每检查及完整VAL/TEST权重绑定，打印计划，不启动训练或读新TEST标签。
 - `smoke` 分别以实际模型和少量真实文件跑一轮，独立 `_smoke` tag，经过两项FT、两项冻结、机制检查，不测TEST。无卡时可加 `--cpu-smoke`，仅为软件检查。
-- `run` 默认按 B8补项 → AR → AW 运行。每个候选顺序为SSL → EF FT → 分割FT → 双冻结探针 → 机制面板 → 分割完整VAL补评；不看冻结成绩决定是否做FT。可用 `--candidate AR` 或 `--candidate AW` 分开执行或接续。相同 `--root/--tag` 保持原协议，不混写历史B8目录。失败后先查当前stage日志；同代码、数据与运行配置下可重跑命令恢复。
+- `run` 默认按 B8补项 → AR → AW 运行。每个候选顺序为SSL → EF FT → 分割FT → 双冻结探针 → 机制面板 → 分割完整VAL补评 → **锁定VAL最佳权重并测双任务TEST**；不看冻结成绩决定是否做FT，也不等人工选组才测TEST。可用 `--candidate AR` 或 `--candidate AW` 分开执行或接续。相同 `--root/--tag` 保持原协议，不混写历史B8训练结果。失败后先查当前stage日志；同代码、数据与运行配置下可重跑命令恢复。
 
 主线分割FT沿用完整训练池、每检查8108抽样、原共同VAL选权重。冻结分割三组都用完整可用TRAIN标签，每标注帧一个确定窗口、无增强，仍用同一共同VAL；完整VAL补评只用于FT，不反向挑权重。EF沿用单W64窗口及同一损失/头/选择规则。两项任务各自微调，非联合模型。
 
-## 读结果与锁 TEST
+## 读结果与默认 TEST
 
 `compare` 只汇总已完成的VAL结果，不训练。核对训练/验证记录、任务头、损失、执行精度、训练配置及数据指纹；`matched_val.json` 列出患者配对差异、边界指标、参数、更新/帧数和耗时。分割另外按同一GT的较大/较小左室面积标作ED/ES代理（只有两个不等面积标注才分组）；不靠帧序猜测，排除的观察数单列。完整VAL核对同源帧、目标位置和GT面积，与共同VAL分开。
 
-只在VAL定案后选一个候选。必要时显式补**一次**配对下游种子43，复用两边400轮源，不重训SSL；此命令只出VAL，保留原主结果。`AR` 只是下面的例子，不代表预选：
+正式运行默认测本次运行的每个候选。各组在推理前分别锁定自身和B8的两个VAL最佳权重哈希。B8复用已验分割TEST、补同源400轮EF TEST；已完成且哈希匹配的评估可复用。`control/<tag>/AR_test.json` 与 `AW_test.json` 分别保存与B8同人口对比的结果。不会把1600轮EF混入，也不会根据TEST改变权重或训练参数。
+
+`test --candidate ...` 只用于对已训练模型补测或重试推理，不重新训练；`--candidate B8` 可单独补基线。必要时显式补**一次**配对下游种子43，复用两边400轮源，不重训SSL。确认运行也默认产出自己的VAL和锁定TEST结果，保留原主结果。`AR` 只是下面的例子：
 
 ```bash
 bash scripts/run_patch8_stage_a.sh compare
-bash scripts/run_patch8_stage_a.sh confirm --candidate AR  # 可选，先于TEST
-bash scripts/run_patch8_stage_a.sh test --candidate AR     # 显式最终选择
+bash scripts/run_patch8_stage_a.sh test --candidate AR     # 仅对既有结果补测或重试
+bash scripts/run_patch8_stage_a.sh confirm --candidate AR  # 可选，同种子配对确认
 ```
 
-若两候选均无实用收益，可 `test --candidate B8`，只补同源400轮基线EF TEST、复用已验分割。选候选时一次锁定候选及B8的两任务best权重哈希；先补B8 EF，再测入选组完整适用分割与EF。已有B8分割TEST须匹配best39；不会把1600轮EF混入。候选TEST锁不允许在同一实验tag换另一候选；不要通过改tag反复利用TEST选择。确认种子不自动晋级、不进TEST，也不以CI跨零自动否定收益。
+逐组锁定文件不会互相覆盖；同一组的已锁权重不能更换。确认种子不自动晋级，也不以CI跨零自动否定收益。TEST是固定配置的终点报告，不是挑配置的循环反馈。
 
 ## 机制产物与限制
 
