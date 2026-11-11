@@ -33,7 +33,7 @@ def reference():
     ef = stage_config(cfg,stages['ef_l1_ft'])
     return dict(base=cfg, stages=stages, zero='/fixtures/epoch_0000.pt', endpoint='/fixtures/epoch_0400.pt',
                 lock={'epoch0':'zero','epoch400':'endpoint'}, ef_probe=Path('/fixtures/ef_linear'),
-                ft={task:(Path('/fixtures')/task,{},f'/fixtures/{task}.pt',dict(config=stage))
+                ft={task:(Path('/fixtures')/task,{},Path(f'/fixtures/{task}.pt'),dict(config=stage))
                     for task,stage in [('ef',ef),('seg',seg)]})
 
 
@@ -46,6 +46,7 @@ class StageATests(unittest.TestCase):
         ref = reference()
         b8 = build_plan(ref,'/out','stage_a','B8')
         self.assertEqual([s['id'] for s in b8['stages']],['seg_linear_0400','diagnostics'])
+        self.assertEqual(b8['stages'][-1]['heads'],{task:str(item[2]) for task,item in ref['ft'].items()})
         for arm in ('AR','AW'):
             cfg = build_plan(ref,'/out','stage_a',arm)
             self.assertEqual([s['id'] for s in cfg['stages']],['pretrain','ef_l1_ft','seg_full_coverage_ft',

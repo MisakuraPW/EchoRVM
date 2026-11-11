@@ -143,7 +143,7 @@ def build_plan(ref, root, tag, arm):
         if source_inputs:
             stage['matched_inputs'] = {key:source_inputs[key] for key in
                                        ('train_records_sha256','val_records_sha256','data_files','head','loss')}
-    heads = {task:ref['ft'][task][2] if arm=='B8' else f'@{stage}/best'
+    heads = {task:str(ref['ft'][task][2]) if arm=='B8' else f'@{stage}/best'
              for task,stage in TASK_STAGES.items()}
     requests = {task:str((ref['ft'][task][0] if arm=='B8' else layout(cfg,stage)['result'])/'request.json')
                 for task,stage in TASK_STAGES.items()}
