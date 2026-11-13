@@ -33,7 +33,8 @@ def load_task(request_path, checkpoint, source_hash, device):
     return exp.model.requires_grad_(False).eval()
 
 
-def task_steps(reader, video, task, target, *, disturb=False, prefix=None, zero_feature=False):
+def task_steps(reader, video, task, target, *, disturb=False, prefix=None, zero_feature=False,
+               reverse_penultimate_write=False):
     """Use the exact FT head, preserving prior descriptors in the isolated read test."""
     steps = [] if prefix is None else list(prefix)
     state = steps[-1]['state'] if steps else None
@@ -42,8 +43,17 @@ def task_steps(reader, video, task, target, *, disturb=False, prefix=None, zero_
         clip = video[:,i*local:(i+1)*local]
         if disturb and i==0:
             clip = torch.zeros_like(clip)
-        with blocked_reads(reader.backbone,feature=zero_feature):
-            output = reader.backbone.stream_clip(clip,state)
+        handle = None
+        if reverse_penultimate_write and i == video.shape[1]//local-2:
+            writer = reader.backbone.temporal_writer
+            order = torch.arange(writer.time-1,-1,-1,device=video.device)
+            handle = writer.register_forward_pre_hook(lambda module,args: (*args,order))
+        try:
+            with blocked_reads(reader.backbone,feature=zero_feature):
+                output = reader.backbone.stream_clip(clip,state)
+        finally:
+            if handle is not None:
+                handle.remove()
         state = output['final_state']
         feature = output['frame_outputs']
         step = dict(state=state, descriptors=feature.mean(2), frame=feature[:,-1])
@@ -143,7 +153,8 @@ def run_panel(cfg, source):
         if budget is not None and time.perf_counter()-started >= budget:
             break
         video = sample['video'][None].to(device)
-        masks = deterministic_masks(model,dict(video=video,record_index=torch.tensor([i])),cfg['training']['seed'])
+        batch = dict(video=video,record_index=torch.tensor([i]))
+        masks = deterministic_masks(model,batch,cfg['training']['seed'])
         patient = sample['patient']
         if i<stage['gradient_cases']:
             credit = gradient_credit(model,video,masks)
@@ -152,13 +163,21 @@ def run_panel(cfg, source):
                 raise RuntimeError('Disconnected/nonfinite past credit in the last-clip-only objective')
             gradients.append(dict(patient=patient,**verify_visibility(model,video,masks),**credit))
         with torch.no_grad():
-            routes = masked_routes(model,video,masks)
+            common = (deterministic_masks(model,batch,cfg['training']['seed'],asymmetric=False)
+                      if getattr(model,'asymmetric_mask',False) else masks)
+            routes = masked_routes(model,video,common)
             row = dict(patient=patient,target_frame=sample['target_frame'],**{'masked_mse_'+k:v for k,v in routes.items()})
             for task,reader in readers.items():
                 target = float(dataset.cases[patient]['ef']) if task=='ef' else sample['mask'].cpu().numpy()
                 clean = task_steps(reader,video,task,target)
                 cut = task_steps(reader,video,task,target,prefix=clean[:-1],zero_feature=True)
                 changed = task_steps(reader,video,task,target,disturb=True)
+                writer = getattr(reader.backbone,'temporal_writer',None)
+                if task=='ef' and writer is not None:
+                    shuffled = task_steps(reader,video,task,target,prefix=clean[:-2],reverse_penultimate_write=True)
+                    torch.testing.assert_close(shuffled[-2]['descriptors'],clean[-2]['descriptors'])
+                    row['ef_writer_reverse_absolute_error_pp'] = shuffled[-1]['metrics']['absolute_error_pp']
+                    row['ef_writer_reverse_prediction_pp'] = shuffled[-1]['metrics']['prediction_pp']
                 for name,values in [('normal',clean),('feature_S_zero',cut)]:
                     for key,value in values[-1]['metrics'].items():
                         if key in {'dice','assd','hd95','absolute_error_pp','prediction_pp'}:
@@ -182,6 +201,8 @@ def run_panel(cfg, source):
                 budget_seconds=budget,panel_sha256=digest(records),budget_truncated=len(rows)!=len(records),
                 scope='VAL-only fixed case panel; masked SSL reconstruction and independent FT task heads',
                 limitations=['Final-clip-only feature intervention retains earlier descriptors and state.',
+                             'Masked route metrics use common symmetric masks; training-budget checks use native masks.',
+                             'Penultimate writer order reversal preserves pixels and the three earlier cached descriptors; only the final clip can read the changed S.',
                              'Decoder intervention is SSL only; task exits never use the reconstruction decoder.',
                              'First clip blackout is a stress test. No FIFO eviction occurs within four clips.',
                              'EF prefix predictions are diagnostic, not the W64 endpoint. Dice uses a real final traced frame.']))

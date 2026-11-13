@@ -22,15 +22,18 @@ def build(config, stage, source, device):
         variant = getattr(model, 'forward_variant', None)
         added = set(init.get('initialized_keys', ()))
         writer = {k for k in model.state_dict() if k.startswith('content_writer.')}
-        expected = writer if variant == 'content_write' else set()
-        if (variant not in {'mid_read', 'content_write'} or init.get('source_epoch') != 0
+        temporal = {k for k in model.state_dict() if k.startswith('temporal_writer.')}
+        expected = writer if variant == 'content_write' else temporal
+        if (variant not in {'mid_read', 'content_write', 'mid_temporal_write'} or init.get('source_epoch') != 0
                 or added != expected or init.get('discarded_keys')
                 or init['loaded_tensors'] != len(model.state_dict()) - len(expected)):
             raise ValueError('Stage A requires exact B8 epoch-0 shared initialization')
-        if variant == 'mid_read' and model.read_after_block != 6:
+        if variant != 'content_write' and model.read_after_block != 6:
             raise ValueError('A-R has one predeclared insertion after block 6')
         if variant == 'content_write' and model.content_writer.score.weight.detach().count_nonzero():
             raise ValueError('A-W must start with uniform attention')
+        if temporal and model.temporal_writer.out.weight.detach().count_nonzero():
+            raise ValueError('R-T must start at the original mean writer')
     return exp
 
 

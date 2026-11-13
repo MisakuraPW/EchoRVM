@@ -12,13 +12,14 @@ from .vit_blocks import CrossBlock
 from .frequency import FrequencyMemoryGates, band_descriptor, multiband_error
 
 
-def temporal_mask(batch, grid, ratio, strategy, device, clip_index=0, spatial_order=None):
+def temporal_mask(batch, grid, ratio, strategy, device, clip_index=0, spatial_order=None, *, keep_spatial=None):
     """All samples have the same mask budget; True means hidden."""
     t, h, w = grid
     spatial, total = h * w, t * h * w
-    keep_spatial = max(1, int(spatial * (1 - ratio)))
+    if keep_spatial is None:
+        keep_spatial = max(1, int(spatial * (1 - ratio)))
     keep = t * keep_spatial
-    if keep >= total:
+    if not 0 < keep < total:
         raise ValueError('Masking needs both visible and hidden tokens.')
     if strategy in {'tube', 'complementary'}:
         if spatial_order is None:

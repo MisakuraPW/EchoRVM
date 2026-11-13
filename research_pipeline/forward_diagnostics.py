@@ -47,7 +47,8 @@ def gradient_credit(model, video, masks, feature=False, decoder=False):
     try:
         with blocked_reads(model, feature, decoder):
             loss = last_clip_loss(model, value, masks)
-        parameters = [(name,p) for name,p in model.named_parameters() if name.startswith(('memory.','content_writer.'))]
+        parameters = [(name,p) for name,p in model.named_parameters()
+                      if name.startswith(('memory.','content_writer.','temporal_writer.'))]
         gradients = torch.autograd.grad(loss, [value, *states, *writes, *[p for _,p in parameters]], allow_unused=True)
         def measure(x):
             return dict(connected=x is not None, norm=None if x is None else float(x.norm()),

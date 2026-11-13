@@ -16,7 +16,8 @@ from .metrics import segmentation_row
 
 
 class TemporalTask(nn.Module):
-    def __init__(self, backbone, task, mode, recent, exit_name, append_boundary, hidden=64, depth=2, heads=4):
+    def __init__(self, backbone, task, mode, recent, exit_name, append_boundary, hidden=64, depth=2, heads=4,
+                 ef_temporal_relation=False):
         super().__init__()
         from models.downstream import ViTPatchSegDecoder
         from models.ef_readout import TemporalEFReadout
@@ -24,7 +25,8 @@ class TemporalTask(nn.Module):
         self.recent, self.exit_name, self.append_boundary = recent, exit_name, append_boundary
         self.linear = mode == 'frozen_linear'
         if task == 'ef':
-            self.head = nn.Linear(backbone.embed_dim, 1) if self.linear else TemporalEFReadout(backbone.embed_dim, hidden)
+            self.head = nn.Linear(backbone.embed_dim, 1) if self.linear else TemporalEFReadout(
+                backbone.embed_dim, hidden, temporal_relation=ef_temporal_relation)
         else:
             self.head = nn.Linear(backbone.embed_dim, 2) if self.linear else ViTPatchSegDecoder(
                 backbone.embed_dim, 2, backbone.token_grid[1], backbone.patch_size, hidden, depth, heads)
@@ -348,12 +350,13 @@ def build(config, stage, source, device):
     if task != 'mae':
         backbone = TemporalTask(backbone, task, stage.get('mode', 'frozen_linear'), recent,
                                 stage.get('exit_name', 'final'), stage.get('append_boundary', False),
-                                stage.get('head_dim', 64), stage.get('head_depth', 2), stage.get('head_heads', 4))
+                                stage.get('head_dim', 64), stage.get('head_depth', 2), stage.get('head_heads', 4),
+                                stage.get('ef_temporal_relation', False))
     metadata = dict(dataset='EchoNet-Dynamic', manifest_sha256=digest(manifest),
                     native_config=native, initialization=report, checkpointing=True,
                     feature_exit=dict(name=stage.get('exit_name', 'final'), layer=len((backbone.backbone if isinstance(backbone, TemporalTask) else backbone).blocks),
-                                      norm='final encoder norm', history_read_before_exit=native.get('forward_variant') == 'mid_read' or stage.get('exit_name', 'final') not in {'local','local_final'},
-                                      local_exit_semantics='post-read final layer, NOT baseline H' if native.get('forward_variant') == 'mid_read' else 'history-free final-layer H'),
+                                      norm='final encoder norm', history_read_before_exit=native.get('forward_variant') in {'mid_read','mid_temporal_write'} or stage.get('exit_name', 'final') not in {'local','local_final'},
+                                      local_exit_semantics='post-read final layer, NOT baseline H' if native.get('forward_variant') in {'mid_read','mid_temporal_write'} else 'history-free final-layer H'),
                     train_ids=sorted(train_ids), val_ids=sorted(val_ids),
                     train_excluded=train.excluded, val_excluded=val.excluded,
                     train_records_sha256=digest(train.records), val_records_sha256=digest(val.records),
@@ -368,6 +371,12 @@ def build(config, stage, source, device):
                     evaluation_scope='Seen-population reconstruction diagnostic; no held-out SSL validation or checkpoint selection' if all_ssl else
                         'TRAIN supervised fitting, VAL selection; TEST labels unopened. Source SSL may have seen VAL/TEST images; see ssl_data_exposure',
                     mask_policy='record-index + epoch keyed train masks; fixed record-index VAL masks')
+    if task == 'mae' and getattr(backbone, 'asymmetric_mask', False):
+        metadata['mask_spatial_kept_by_clip'] = [backbone.visible_spatial_tokens(i) for i in range(4)]
+        base = backbone.visible_spatial_tokens(0, asymmetric=False)
+        if sum(metadata['mask_spatial_kept_by_clip']) != 4*base:
+            raise ValueError('Unmatched four-clip visible token budget')
+        metadata['mask_policy'] += '; source/target alternation on four clips only, shorter windows unchanged'
     exp = EchoExperiment(backbone.to(device), IdentifiedDataset(train, 'train'), IdentifiedDataset(val, 'val'),
                          task, metadata, microbatch_safe=True, cacheable=frozen and task != 'mae')
     exp.native_config = native

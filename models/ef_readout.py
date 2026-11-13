@@ -11,13 +11,22 @@ class TemporalEFReadout(nn.Module):
     Complexity is linear in descriptor count. Parameter count is independent of
     the number of clips or memory slots, unlike flatten-and-MLP readouts.
     """
-    def __init__(self, dim, hidden=64):
+    def __init__(self, dim, hidden=64, temporal_relation=False):
         super().__init__()
         self.project = nn.Linear(dim, hidden)
         self.history_type = nn.Parameter(torch.zeros(1, 1, hidden))
         self.norm = nn.LayerNorm(hidden)
         self.score = nn.Linear(hidden, 1)
         self.regress = nn.Sequential(nn.Linear(hidden, hidden), nn.GELU(), nn.Linear(hidden, 1))
+        if temporal_relation:
+            with torch.random.fork_rng(devices=[]):
+                self.relation_norm = nn.LayerNorm(hidden)
+                self.relation = nn.MultiheadAttention(hidden, 4, batch_first=True)
+                self.relation_ffn = nn.Sequential(nn.LayerNorm(hidden), nn.Linear(hidden, 256),
+                                                  nn.GELU(), nn.Linear(256, hidden))
+                for layer in (self.relation.out_proj, self.relation_ffn[-1]):
+                    nn.init.zeros_(layer.weight)
+                    nn.init.zeros_(layer.bias)
 
     def forward(self, descriptors, history_slots=0):
         x = self.project(descriptors)
@@ -29,6 +38,10 @@ class TemporalEFReadout(nn.Module):
             kind = torch.zeros_like(x)
             kind[:, -history_slots:] = self.history_type
             x = x + kind
+        if hasattr(self, 'relation'):
+            y = self.relation_norm(x)
+            x = x + self.relation(y, y, y, need_weights=False)[0]
+            x = x + self.relation_ffn(x)
         x = self.norm(x)
         weights = self.score(x).softmax(1)
         return self.regress((x * weights).sum(1)).squeeze(-1)

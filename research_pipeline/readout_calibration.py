@@ -45,8 +45,10 @@ class CalibratedExperiment(EchoExperiment):
 
 
 def build(config, stage, source, device):
-    if stage['kind'] not in {'ef', 'seg'} or stage.get('mode') != 'finetune' or not source:
-        raise ValueError('Readout calibration requires native pretrained weights and full task fine-tuning')
+    valid_mode = stage.get('mode') == 'finetune' or (
+        stage['kind'] == 'ef' and stage.get('mode') == 'frozen_lite' and stage.get('calibrated_ef'))
+    if stage['kind'] not in {'ef', 'seg'} or not valid_mode or not source:
+        raise ValueError('Calibrated readout requires native weights and an applicable supervised task mode')
     reference = build_reference(config, stage, source, device)
     exp = CalibratedExperiment(reference.model, reference.train, reference.val, reference.task,
                                reference.metadata, reference.microbatch_safe, reference.cacheable)
@@ -76,5 +78,7 @@ def build(config, stage, source, device):
         exp.metadata.update(head='TemporalEFReadout, zero last weight, bias=.556',
                             loss='L1 on EF percentage points',
                             head_transfer=dict(policy='new task head; same cache sequence, no state-only exit'))
+        if stage.get('ef_temporal_relation'):
+            exp.metadata['head'] += ', one residual temporal relation block'
     exp.metadata['calibration_scope'] = 'task recipe bundle; not single-factor causal attribution or official reproduction'
     return exp

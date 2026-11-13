@@ -50,7 +50,10 @@ def event(path, **value):
 def layout(config, stage=None):
     root, tag = Path(config['run']['root']), config['run']['tag']
     suffix = Path(tag) / stage if stage else Path(tag)
-    return {key: root / key / suffix for key in ('result', 'ckpt', 'cache')}
+    paths = {key: root / key / suffix for key in ('result', 'ckpt', 'cache')}
+    if config['run'].get('cache_root'):
+        paths['cache'] = Path(config['run']['cache_root']) / suffix
+    return paths
 
 
 def code_identity(extra=()):

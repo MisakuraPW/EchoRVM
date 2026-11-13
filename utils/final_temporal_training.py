@@ -132,15 +132,19 @@ def initialize_candidate(model, manifest, job, device):
             torch.cuda.empty_cache()
 
 
-def deterministic_masks(model, batch, seed):
+def deterministic_masks(model, batch, seed, *, asymmetric=True):
     masks = []
     count = batch['video'].shape[1] // model.local_frames
     device = batch['video'].device
     for index in batch['record_index'].tolist():
         generator = torch.Generator(device=device).manual_seed(seed + int(index) * 1009)
         order = torch.rand(1, model.token_grid[1] * model.token_grid[2], generator=generator, device=device).argsort(-1)
-        masks.append(torch.stack([temporal_mask(1, model.token_grid, model.mask_ratio, model.research_mask,
-                                               device, i, order)[0] for i in range(count)]))
+        if hasattr(model, 'reconstruction_mask'):
+            masks.append(torch.stack([model.reconstruction_mask(1, device, i, order, asymmetric=asymmetric and count==4)[0]
+                                      for i in range(count)]))
+        else:
+            masks.append(torch.stack([temporal_mask(1, model.token_grid, model.mask_ratio, model.research_mask,
+                                                   device, i, order)[0] for i in range(count)]))
     return torch.stack(masks)
 
 

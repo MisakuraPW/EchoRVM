@@ -3,7 +3,6 @@
 import torch
 
 from models.final_temporal_mae import FinalTemporalMAE
-from models.temporal_mae import temporal_mask
 from models.video_mae import tubelet_patchify
 
 
@@ -17,8 +16,10 @@ def supported(model):
 def local_objective(model, clip, mask, indices, state):
     encoded, raw = model.encode_current(clip, mask, state, visible_indices=indices)
     writing = raw if model.memory_write_source == 'local' else encoded
-    if (model.memory_mode in {'global', 'none'} and model.memory_compression == 'mean'
-            and getattr(model, 'forward_variant', None) != 'content_write'):
+    if getattr(model, 'forward_variant', None) == 'mid_temporal_write':
+        pooled = model._call(model.temporal_writer, writing, None, None)
+    elif (model.memory_mode in {'global', 'none'} and model.memory_compression == 'mean'
+            and getattr(model, 'forward_variant', None) not in {'content_write', 'mid_temporal_write'}):
         pooled = writing.mean(1, keepdim=True)
     else:
         pooled = model.write_summary(writing, mask, torch.ones_like(mask), state)
@@ -36,7 +37,7 @@ def enable_compiled_clips(model):
     """Compile only tensor work; parameter/state-dict names remain unchanged."""
     if (not supported(model) or model.frame_readout != 'repeat' or model.memory_mode != 'global'
             or model.memory_compression != 'mean' or model.gradient_checkpointing
-            or getattr(model, 'forward_variant', None) == 'content_write'):
+            or getattr(model, 'forward_variant', None) in {'content_write', 'mid_temporal_write'}):
         raise ValueError('Compiled clips require deterministic B0/A global-repeat execution without recomputation')
     import functools
     model._pipeline_compiled_clip = torch.compile(functools.partial(local_objective, model),
@@ -57,6 +58,12 @@ def active_clip_loss(model, samples, seed):
         raise ValueError('SSL windows must contain real complete local clips')
     if any(tuple(s['video'].shape[-2:]) != (model.img_size, model.img_size) for s in samples):
         raise ValueError('MAE data/model spatial contract mismatch')
+    # Short records keep their original budget and full training eligibility.
+    full = [t == 4*model.local_frames for t in lengths]
+    if getattr(model, 'asymmetric_mask', False) and any(full) and not all(full):
+        groups = [[s for s, flag in zip(samples, full) if flag == role] for role in (True, False)]
+        return sum(active_clip_loss(model, group, seed)*len(group)/len(samples) for group in groups)
+    asymmetric = all(full)
     gt, gh, gw = model.token_grid
     orders = []
     for sample in samples:
@@ -66,7 +73,6 @@ def active_clip_loss(model, samples, seed):
     # Preserve the loader's pinned storage instead of concatenating pageable CPU
     # clips at every recurrent step. Device-side stacking stays asynchronous.
     videos = [sample['video'].to(device, non_blocking=True) for sample in samples]
-    keep = gt*max(1, int(gh*gw*(1-model.mask_ratio)))
     state, old_active = None, list(range(len(samples)))
     numerator = torch.zeros(len(samples), device=device)
     denominator = torch.zeros_like(numerator)
@@ -82,8 +88,9 @@ def active_clip_loss(model, samples, seed):
             clip = clip[:, :, :1]
         elif clip.shape[2] == 1:
             clip = clip.expand(-1, -1, model.in_chans, -1, -1)
-        mask = temporal_mask(len(active), model.token_grid, model.mask_ratio, model.research_mask,
-                             device, step, orders.index_select(0, ids))
+        mask = model.reconstruction_mask(len(active), device, step, orders.index_select(0, ids),
+                                         asymmetric=asymmetric)
+        keep = gt*model.visible_spatial_tokens(step, asymmetric=asymmetric)
         indexed = model.frame_readout == 'repeat'
         indices = mask.to(torch.int8).argsort(dim=1, stable=True)[:, :keep] if indexed else None
         step_function = getattr(model, '_pipeline_compiled_clip', None)

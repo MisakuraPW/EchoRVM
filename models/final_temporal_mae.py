@@ -235,8 +235,9 @@ class FinalTemporalMAE(TemporalMAE):
             valid = tv[:, :, None].expand(-1, -1, gh * gw).flatten(1)
             state = self._intervene(state, i, intervention, reset_interval)
             previous = state
-            mask = (masks[:, i] if masks is not None else temporal_mask(b, self.token_grid, self.mask_ratio,
-                     self.research_mask, video.device, i, order)) if reconstruct else None
+            mask = (masks[:, i] if masks is not None else
+                    self.reconstruction_mask(b, video.device, i, order,
+                                             asymmetric=frames == 4*self.local_frames)) if reconstruct else None
             encoded, raw = self.encode_current(clip, mask, previous)
             pooled = self.write_summary(raw if self.memory_write_source == 'local' else encoded, mask, valid, previous)
             if reconstruct and (i + 1) * self.local_frames > frames - suffix:
@@ -283,6 +284,15 @@ class FinalTemporalMAE(TemporalMAE):
                               frame_base_outputs=torch.cat(frame_base, 1), local_base_outputs=torch.cat(local_base, 1),
                               local_frame_outputs=torch.cat(local_final, 1))
         return result
+
+    def visible_spatial_tokens(self, clip_index, *, asymmetric=True):
+        _, h, w = self.token_grid
+        return max(1, int(h*w*(1-self.mask_ratio)))
+
+    def reconstruction_mask(self, batch, device, clip_index, order, *, asymmetric=True):
+        return temporal_mask(batch, self.token_grid, self.mask_ratio, self.research_mask,
+                             device, clip_index, order,
+                             keep_spatial=self.visible_spatial_tokens(clip_index, asymmetric=asymmetric))
 
     def encode_current(self, clip, mask, previous, visible_indices=None):
         encoded, _ = self.encode_video(clip, mask, visible_indices=visible_indices)
@@ -346,6 +356,8 @@ def load_final_model(path, overrides=None, seed=42):
                  'memory.candidate_down.', 'memory.candidate_up.')
     if cfg.get('forward_variant') == 'content_write':
         permitted += ('content_writer.',)
+    if cfg.get('forward_variant') == 'mid_temporal_write':
+        permitted += ('temporal_writer.',)
     bad_missing = [k for k in missing if not k.startswith(permitted)]
     if discarded or bad_missing:
         raise ValueError(f'Unexpected warm-start mismatch: missing={bad_missing}, discarded={discarded}')

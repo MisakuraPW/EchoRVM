@@ -156,7 +156,7 @@ def build_plan(ref, root, tag, arm):
     return validate(cfg)
 
 
-def summary_pair(reference, candidate, task):
+def summary_pair(reference, candidate, task, *, same_head=True):
     from research_pipeline.metrics import paired_bootstrap
 
     a,b = (completed(path) for path in (reference,candidate))
@@ -164,7 +164,10 @@ def summary_pair(reference, candidate, task):
     for key in ('training','evaluation','data','precision'):
         if pa[key] != pb[key]:
             raise ValueError(f'Unmatched {key}: {reference} vs {candidate}')
-    for key in ('train_records_sha256','val_records_sha256','head','loss','data_files'):
+    keys = ['train_records_sha256','val_records_sha256','loss','data_files']
+    if same_head:
+        keys.append('head')
+    for key in keys:
         if pa['inputs'][key] != pb['inputs'][key]:
             raise ValueError(f'Unmatched {key}: {reference} vs {candidate}')
     metric, field = ('mae_pp','absolute_error') if task=='ef' else ('dice_mean','dice')
@@ -268,7 +271,7 @@ def lock_selection(path, selection):
     write_json(path,selection)
 
 
-def test_endpoints(endpoints, jobs, data_root, seed, control, name):
+def test_endpoints(endpoints, jobs, data_root, seed, control, name, reference='B8'):
     from utils.final_temporal_data import build_manifest
 
     weights = {arm:{task:file_hash(item[2]) for task,item in entries.items()}
@@ -286,9 +289,10 @@ def test_endpoints(endpoints, jobs, data_root, seed, control, name):
         for task in paths:
             if report[arm][task]['checkpoint_sha256'] != weights[arm][task]:
                 raise ValueError('TEST artifact does not match its VAL lock')
-            if arm!='B8':
-                match_observations(dirs['B8'][task],paths[task],task)
-        report[arm]['seg_phases'] = phase_metrics(paths['seg'],manifest,'test')
+            if arm!=reference:
+                match_observations(dirs[reference][task],paths[task],task)
+        if 'seg' in paths:
+            report[arm]['seg_phases'] = phase_metrics(paths['seg'],manifest,'test')
     write_json(control/f'{name}_test.json',report)
 
 
