@@ -321,6 +321,9 @@ def run_training(cfg, source):
                     raise FloatingPointError('Nonfinite training loss; previous durable checkpoint retained')
                 if not update_step(exp.model, optimizer, scaler, train['clip_norm']):
                     raise FloatingPointError('AMP skipped an optimizer update; abort rather than silently spend the scientific budget')
+                if hasattr(exp,'optimizer_metrics'):
+                    for name,value in exp.optimizer_metrics().items():
+                        monitor_sum[name]=monitor_sum.get(name,0.)+value*pending
                 active = {name for name, param in exp.model.named_parameters() if param.grad is not None}
                 progress['active_names'] = sorted(set(progress['active_names']) | active)
                 scheduler.step()
