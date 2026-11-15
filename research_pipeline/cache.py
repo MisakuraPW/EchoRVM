@@ -14,17 +14,18 @@ from .artifacts import digest, file_hash, write_json
 
 
 class FeatureDataset(Dataset):
-    def __init__(self, directory):
+    def __init__(self, directory, view='features'):
         self.directory = Path(directory)
         self.records = [json.loads(line) for line in (self.directory / 'records.jsonl').read_text(encoding='utf-8').splitlines()]
         self._features = self._targets = None
+        self.view = view
 
     def __len__(self):
         return len(self.records)
 
     def __getitem__(self, index):
         if self._features is None:
-            self._features = np.load(self.directory / 'features.npy', mmap_mode='r')
+            self._features = np.load(self.directory / (self.view+'.npy'), mmap_mode='r')
             self._targets = np.load(self.directory / 'targets.npy', mmap_mode='r')
         record = dict(self.records[index])
         record['features'] = torch.from_numpy(np.array(self._features[index], copy=True))
@@ -79,10 +80,15 @@ def _make_space(directory, destination, budget_root, expected, budget_bytes, min
 
 
 def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes, heartbeat=None, batch_size=4, budget_root=None,
-                  evict_completed=False):
+                  evict_completed=False, *, feature_dtype='float32', derived_views=None, view='features'):
     if not experiment.cacheable:
         raise ValueError('Frozen caching requires an adapter declaring deterministic unaugmented features')
+    if feature_dtype not in {'float32','float16'}:
+        raise ValueError('Frozen cache storage must be float32 or float16')
     directory = Path(directory)
+    derived_views = derived_views or {}
+    if set(derived_views)&{'features','targets'} or (view != 'features' and view not in derived_views):
+        raise ValueError('Requested cache view is not defined')
     directory.mkdir(parents=True, exist_ok=True)
     if budget_root is not None:
         used = sum(p.stat().st_size for p in Path(budget_root).rglob('*') if p.is_file())
@@ -94,6 +100,8 @@ def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes,
         destination = directory / split
         destination.mkdir(parents=True, exist_ok=True)
         key = digest(dict(identity=identity, split=split, samples=len(dataset), precision='fp32'))
+        if derived_views or feature_dtype != 'float32':
+            key = digest(dict(base=key, storage=feature_dtype, views=sorted(derived_views)))
         done = destination / 'DONE.json'
         if done.exists():
             metadata = json.loads(done.read_text(encoding='utf-8'))
@@ -106,15 +114,21 @@ def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes,
             required_total += metadata['required_bytes']
             if required_total > budget_bytes:
                 raise OSError('Existing frozen cache exceeds the configured stage cache budget')
-            setattr(experiment, split, FeatureDataset(destination))
+            setattr(experiment, split, FeatureDataset(destination,view))
             continue
         experiment.model.eval()
+        def arrays(samples):
+            x = experiment.features(samples).detach()
+            dtype = torch.float16 if feature_dtype=='float16' else torch.float32
+            values = {'features':x.to(dtype).cpu().numpy()}
+            values.update({name:transform(x).float().cpu().numpy() for name,transform in derived_views.items()})
+            return values
         with torch.no_grad():
-            first = experiment.features([dataset[0]]).detach().float().cpu().numpy()[0]
+            first = arrays([dataset[0]])
         sample = dataset[0]
         target_key = 'mask' if 'mask' in sample else 'target'
         target = np.asarray(sample[target_key])
-        expected = len(dataset) * (first.nbytes + target.nbytes) + 1024 * 1024
+        expected = len(dataset) * (sum(x[0].nbytes for x in first.values()) + target.nbytes) + 1024 * 1024
         required_total += expected
         budget_root = Path(budget_root) if budget_root else directory
         if evict_completed:
@@ -124,10 +138,15 @@ def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes,
         if required_total > budget_bytes or other_bytes+expected > budget_bytes:
             raise OSError(f'Frozen cache needs ~{required_total/1024**3:.2f} GiB, exceeding cache_gb; '
                           'increase disk cache budget or explicitly disable cache_frozen (slower)')
-        if shutil.disk_usage(directory).free < expected + min_free_bytes:
+        partial_bytes = 0
+        for p in destination.glob('*.npy'):
+            if p.is_file():
+                stat = p.stat()
+                partial_bytes += getattr(stat,'st_blocks',None)*512 if hasattr(stat,'st_blocks') else stat.st_size
+        if shutil.disk_usage(directory).free + partial_bytes < expected + min_free_bytes:
             raise OSError('Insufficient free disk for frozen features plus safety reserve')
-        features = np.lib.format.open_memmap(destination / 'features.npy', mode='w+', dtype=np.float32,
-                                            shape=(len(dataset), *first.shape))
+        features = {name:np.lib.format.open_memmap(destination / (name+'.npy'), mode='w+', dtype=x.dtype,
+                    shape=(len(dataset), *x.shape[1:])) for name,x in first.items()}
         targets = np.lib.format.open_memmap(destination / 'targets.npy', mode='w+', dtype=target.dtype,
                                            shape=(len(dataset), *target.shape))
         # Stream extraction: neither the full video population nor all features enter RAM/VRAM.
@@ -136,31 +155,36 @@ def prepare_cache(experiment, directory, identity, budget_bytes, min_free_bytes,
             while index < len(dataset):
                 samples = [dataset[i] for i in range(index, min(len(dataset), index+batch_size))]
                 try:
-                    values = experiment.features(samples).detach().float().cpu().numpy()
+                    values = arrays(samples)
                 except torch.cuda.OutOfMemoryError:
                     if len(samples) == 1:
                         raise
                     batch_size = max(1, len(samples)//2)
                     torch.cuda.empty_cache()
                     continue
-                if tuple(values.shape[1:]) != first.shape or not np.isfinite(values).all():
+                if any(x.shape[1:] != first[name].shape[1:] or not np.isfinite(x).all() for name,x in values.items()):
                     raise ValueError('Frozen features must have one finite fixed shape; use an adapter with explicit padding/masks otherwise')
                 for offset, sample in enumerate(samples):
-                    features[index+offset], targets[index+offset] = values[offset], np.asarray(sample[target_key])
+                    for name,x in values.items():
+                        features[name][index+offset] = x[offset]
+                    targets[index+offset] = np.asarray(sample[target_key])
                     record = dict(_metadata(sample), _target_key=target_key)
                     handle.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + '\n')
                 index += len(samples)
                 if heartbeat:
                     heartbeat(phase='feature_cache', split=split, completed=index, total=len(dataset), batch_size=batch_size)
-        features.flush(); targets.flush()
+        for x in features.values():
+            x.flush()
+        targets.flush()
+        del x
         del features, targets
         files = {}
-        for name in ('features.npy', 'targets.npy', 'records.jsonl'):
+        for name in (*(name+'.npy' for name in first), 'targets.npy', 'records.jsonl'):
             path = destination / name
             files[name] = dict(bytes=path.stat().st_size, mtime_ns=path.stat().st_mtime_ns, sha256=file_hash(path))
         write_json(done, dict(identity=key, files=files, required_bytes=expected,
                              reuse_check='size+mtime; SHA256 recorded at creation'))
-        setattr(experiment, split, FeatureDataset(destination))
-    return dict(bytes=required_total, directory=str(directory), precision='fp32',
+        setattr(experiment, split, FeatureDataset(destination,view))
+    return dict(bytes=required_total, directory=str(directory), precision='fp32' if feature_dtype=='float32' else feature_dtype,
                 completed_cache_eviction=bool(evict_completed),
                 note='Deterministic frozen features only; no augmentation or encoder updates')

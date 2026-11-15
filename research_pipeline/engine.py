@@ -55,6 +55,8 @@ def prepare_features(exp, cfg, source, heartbeat):
         key = cache_identity(exp, cfg, source)
         root = layout(cfg)['cache']
         directory = root / 'frozen' / digest(key)
+        if hasattr(exp, 'prepare_feature_cache'):
+            return exp.prepare_feature_cache(cfg, directory, key, heartbeat)
         return prepare_cache(exp, directory, key,
                              int(cfg['runtime']['cache_gb']*1024**3), int(cfg['runtime']['min_free_gb']*1024**3),
                              heartbeat, batch_size=cfg['runtime']['micro_batch'], budget_root=root,
@@ -423,6 +425,8 @@ def run_training(cfg, source):
         selected_name = progress['best_file'] or 'final.pt'
         selected = torch.load(checkpoints / selected_name, map_location='cpu', weights_only=False)
         exp.model.load_state_dict(selected['model'])
+        if hasattr(exp, 'verify_frozen'):
+            write_json(output/'frozen_integrity.json', exp.verify_frozen())
         _, metrics, patients, observations = evaluate(exp, cfg, selection, beat, validation_loader)
         with torch.no_grad():
             exp.preview(preview_samples, output / 'previews')
@@ -440,7 +444,8 @@ def run_training(cfg, source):
                        trainable_parameters=sum(p.numel() for p in exp.model.parameters() if p.requires_grad),
                        parameters_with_observed_gradients=sum(p.numel() for name,p in exp.model.named_parameters()
                                                              if name in progress['active_names']),
-                       parameter_count_scope='full adapter including inactive reconstruction decoder; observed gradients reported separately',
+                       parameter_count_scope=exp.metadata.get('parameter_count_scope',
+                           'full adapter including inactive reconstruction decoder; observed gradients reported separately'),
                        checkpoints={name: dict(path=str(checkpoints / name), sha256=file_hash(checkpoints / name),
                                                bytes=(checkpoints / name).stat().st_size)
                                     for name in {selected_name, 'final.pt', *[p.name for p in checkpoints.glob('epoch_*.pt')]}},
@@ -451,7 +456,10 @@ def run_training(cfg, source):
                        ssl_data_exposure=exp.metadata.get('ssl_data_exposure'),
                        diagnostic_overlap=diagnostic, cache=cache_report)
         write_json(output / 'summary.json', summary)
-        mark_done(output, ['summary.json', 'protocol.json', 'metrics.csv', 'patients.json', 'observations.json', 'strata.json'])
+        artifacts = ['summary.json', 'protocol.json', 'metrics.csv', 'patients.json', 'observations.json', 'strata.json']
+        if hasattr(exp, 'verify_frozen'):
+            artifacts.append('frozen_integrity.json')
+        mark_done(output, artifacts)
         beat(force=True, phase='done', epoch=progress['epoch'], metrics=metrics)
         return summary
     except BaseException as exc:

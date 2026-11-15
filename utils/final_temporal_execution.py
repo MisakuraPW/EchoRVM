@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 
-def encode_window(model, video, prefix_frames=0, recent_frames=64, target_index=None):
+def encode_window(model, video, prefix_frames=0, recent_frames=64, target_index=None, *, keep_final_grid=False):
     prefix = int(prefix_frames)
     if prefix < 0 or prefix % model.local_frames or video.shape[1] % model.local_frames:
         raise ValueError('Task windows require complete real clips')
@@ -22,6 +22,7 @@ def encode_window(model, video, prefix_frames=0, recent_frames=64, target_index=
     state = boundary = None
     sequences = dict(final=[], base=[], local=[], local_final=[])
     maps = {}
+    final_grid = []
     for start in range(0, video.shape[1], model.local_frames):
         if start == prefix:
             boundary = state
@@ -29,6 +30,8 @@ def encode_window(model, video, prefix_frames=0, recent_frames=64, target_index=
         state = out['final_state']
         if start < prefix:
             continue
+        if keep_final_grid:
+            final_grid.append(out['frame_outputs'])
         exits = dict(final=out['frame_outputs'], base=out['frame_base_outputs'],
                      local=out['local_base_outputs'], local_final=out['local_frame_outputs'])
         for name, value in exits.items():
@@ -40,8 +43,11 @@ def encode_window(model, video, prefix_frames=0, recent_frames=64, target_index=
                         maps[name] = value.new_zeros(len(video), value.shape[2], value.shape[3])
                     rows = choose.nonzero().flatten()
                     maps[name][rows] = value[rows, targets[rows] - start]
-    return dict(sequences={key:torch.cat(values, 1) for key, values in sequences.items()},
-                maps=maps, boundary=boundary, final_state=state)
+    result = dict(sequences={key:torch.cat(values, 1) for key, values in sequences.items()},
+                  maps=maps, boundary=boundary, final_state=state)
+    if keep_final_grid:
+        result['final_grid'] = torch.cat(final_grid, 1)
+    return result
 
 
 def task_features(exits, task, exit_name='final', append_boundary=False, memory_slots=0):
