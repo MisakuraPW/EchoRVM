@@ -1,5 +1,6 @@
 """Stage B: causal boundary decisions over real, variable-length A-R clips."""
 
+from pathlib import Path
 import random
 
 import torch
@@ -271,7 +272,7 @@ def evaluation_dataset(cfg,manifest,split,task):
 
 
 def build(config,stage,source,device):
-    ssl=config['stage_b_ssl']['path']
+    ssl=Path(config['stage_b_ssl']['path']).resolve()
     if file_hash(ssl)!=config['stage_b_ssl']['sha256']:
         raise ValueError('A-R fixed SSL source changed')
     reference=stage_a.build(config,stage,ssl,device)
@@ -285,9 +286,12 @@ def build(config,stage,source,device):
     if policy not in ('uniform','observed'):
         raise ValueError('Unknown boundary policy')
     model=VariableEF(backbone,reference.model.head,policy).to(device)
-    if source!=ssl:
+    if not source:
+        raise ValueError('Stage B source must be explicit')
+    if Path(source).resolve()!=ssl:
         payload=torch.load(source,map_location='cpu',weights_only=True)
-        if payload.get('source')!=ssl or not payload.get('stage_b_warmup') or stage['id']=='B1':
+        known=payload.get('source')
+        if not known or Path(known).resolve()!=ssl or not payload.get('stage_b_warmup') or stage['id']=='B1':
             raise ValueError('B2 requires the VAL-selected B1 full EF checkpoint')
         model.load_state_dict(payload['model'],strict=True)
     elif stage['id']!='B1':
