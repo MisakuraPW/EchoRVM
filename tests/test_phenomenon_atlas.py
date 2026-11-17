@@ -27,7 +27,7 @@ class AtlasTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as base:
             p = Path(base)
             yy, xx = np.mgrid[:24, :24]
-            mask = np.array([(xx-12)**2+(yy-12)**2 <= r*r for r in range(4, 14)]*2)
+            mask = np.array([(xx-12)**2+(yy-12)**2 <= r*r for r in range(4, 14)]*2 + [xx**2+yy**2 < 24])
             np.savez(p / "allowed.npz", video=mask.astype(np.float32)*.5+.2,
                      mask=mask.astype(np.uint8), fps=50.)
             ids = p / "ids.txt"
@@ -37,6 +37,8 @@ class AtlasTest(unittest.TestCase):
             self.assertEqual(len(curves), 1)
             self.assertTrue(all(r["floor"] >= 0 for r in pairs))
             self.assertEqual({r["slots"] for r in budget if r["task"] == "partition"}, {4})
+            variable = [sorted(r["lengths"]) for r in budget if r["task"] == "partition" and r["strategy"] != "equal"]
+            self.assertEqual(variable[0], variable[1])
             data = dict(metadata=[], spatial=[], history=[], scale=[], perturb=[],
                         dense_pairs=pairs, curves=curves, budget=budget, references=refs,
                         counts=dict(development_rows=0, with_endpoint_pair=0, image_cases=0), dense_cases=1)

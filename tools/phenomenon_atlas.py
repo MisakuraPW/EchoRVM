@@ -292,13 +292,15 @@ def dense_measurements(root, allowed):
         # Fixed descriptor budget: four scalar means, decoded piecewise-constant.
         # Test the same length multiset in two orders; do not pick the winner per patient.
         if len(area) >= 16:
-            cuts = np.rint(np.asarray([0, .25, .5, .75, 1])*len(area)).astype(int)
+            q = len(area)//4
+            cuts = np.asarray([0, q, 2*q, 3*q, len(area)])
             shift = max(1, (cuts[2]-cuts[1])//3)
             for name, delta in (("equal", 0), ("earlier", -shift), ("later", shift)):
                 b = cuts.copy()
                 b[2] += delta
                 yh = np.concatenate([np.repeat(area[a:z].mean(), z-a) for a,z in zip(b[:-1],b[1:])])
                 budget.append(dict(case=case, strategy=name, slots=4, task="partition",
+                                   lengths=np.diff(b).tolist(),
                                    mae=float(np.mean(np.abs(yh-area))),
                                    amplitude_error=float(abs(np.ptp(yh)-np.ptp(area))),
                                    max_delay_ms=float(1000*np.diff(b).max()/fps)))
@@ -331,6 +333,7 @@ def main():
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--dense-root", type=Path)
     p.add_argument("--dense-dev-ids", type=Path)
+    p.add_argument("--dense-source", choices=("ted", "camus_half_proxy"), default="ted")
     p.add_argument("--reuse-echo", type=Path, help="Sealed EchoNet measurements.json from an earlier pass")
     p.add_argument("--image-cases", type=int, default=0, help="0 = all eligible VAL image cases")
     p.add_argument("--seed", type=int, default=42)
@@ -356,6 +359,7 @@ def main():
     result = dict(schema=1, seed=a.seed, metadata=meta, spatial=spatial, history=hist,
                   scale=scale, perturb=pert, dense_pairs=pairs, curves=curves, budget=budget,
                   references=refs, counts=counts, dense_cases=len(curves),
+                  dense_source=a.dense_source if curves else None,
                   sources=sources)
     dest = a.output / "measurements.json"
     tmp = dest.with_suffix(".tmp")

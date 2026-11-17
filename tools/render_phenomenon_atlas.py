@@ -43,11 +43,14 @@ def trend(ax, x, samples, label, **kwargs):
     ax.fill_between(x, q[:, 0], q[:, 1], color=result[0].get_color(), alpha=.13)
 
 
-def finish(fig):
+def finish(fig, save=None):
     stream = io.BytesIO()
     fig.savefig(stream, format="svg", bbox_inches="tight", metadata={"Date": None})
     plt.close(fig)
-    return '<img alt="Quantitative plot" src="data:image/svg+xml;base64,' + base64.b64encode(stream.getvalue()).decode() + '">'
+    content = stream.getvalue()
+    if save is not None:
+        save.write_bytes(content)
+    return '<img alt="Quantitative plot" src="data:image/svg+xml;base64,' + base64.b64encode(content).decode() + '">'
 
 
 def figure(columns=2):
@@ -95,7 +98,7 @@ def geometry(data):
     axes[1].legend(fontsize=8)
     axes[1].set(xlabel="Frame separation", ylabel="Minimum shared-mask error (% pixels)")
     return fig, (f"{len(counts)} 例，{len(rows):,} 个相邻帧对。Hamming 下界仅约束两帧共用同一掩码，"
-                 "不是 ViT、tubelet 或 Dice 的下界；TED 中间参考含插值和人工复核。")
+                 "不是 ViT、tubelet 或 Dice 的下界。")
 
 
 def function(data):
@@ -111,9 +114,9 @@ def function(data):
         for r in data["curves"]:
             a = np.array(r["area"])
             axes[2].plot(1000*np.arange(len(a))/r["fps"], a/a.max(), alpha=.55)
-        axes[2].set(xlabel="Time from cycle start (ms)", ylabel="TED area / cycle maximum")
+        axes[2].set(xlabel="Time from sequence start (ms)", ylabel="Area / sequence maximum")
     return fig, (f"EchoNet {len(rows):,} 例。看相近端点面积下 EF 的条件分布；像素面积不等于容积，不能由此断言某项表征充分。"
-                 "右图（如有）是独立画法的 TED 参考面积轨迹，不是 EchoNet 同一批病例。")
+                 "右图（如有）来自独立绘制的 CAMUS/TED 面板，不是 EchoNet 同一批病例。")
 
 
 def budgets(data):
@@ -150,7 +153,7 @@ def past_reference(data):
     return fig, "直接借用过去参考掩码是特权几何参照；当前对比度和位移共变，不说明状态因果，也不等于经过配准的历史上界。"
 
 
-def dense_example(data):
+def dense_example(data, save=None):
     rows = [r for r in data["curves"] if "example" in r]
     if not rows:
         return ""
@@ -161,9 +164,11 @@ def dense_example(data):
         ax.contour(r["outlines"][i], levels=[.5], colors=["#e6b845"], linewidths=.7)
         ax.set_title(f"Frame t{'+1' if i else ''}")
         ax.axis("off")
-    return (finish(fig) + f"<p>示例规则：每病例外观距离最低四分位内取轮廓差异最大帧对，"
+    attribution = ("TED：Painchaud 等，IEEE TMI 2022" if data.get("dense_source") == "ted"
+                   else "CAMUS：Leclerc 等，IEEE TMI 2019；中间轮廓为代理")
+    return (finish(fig, save) + f"<p>示例规则：每病例外观距离最低四分位内取轮廓差异最大帧对，"
             f"展示病例间该差异的中位附近。图像 RMSE {r['image']:.3f}，轮廓 1−IoU {r['geometry']:.3f}。"
-            "TED：Painchaud 等，IEEE TMI 2022，CC BY-NC-SA 4.0；缩放至 112×112。</p>")
+            f"{attribution}，CC BY-NC-SA 4.0；缩放至 112×112。</p>")
 
 
 def masks(data):
@@ -274,9 +279,9 @@ def readings(d):
     if z:
         floor = 100*per_case(z, lambda r: r["floor"])
         iou = per_case(z, lambda r: r["geometry"])
-        out.append(f"TED 小面板：相邻帧的病例均值再取中位数，共享二值掩码的全图 Hamming 下界为 "
+        out.append(f"稠密轮廓面板：相邻帧的病例均值再取中位数，共享二值掩码的全图 Hamming 下界为 "
                    f"{np.median(floor):.3f}% 像素，参考轮廓自身的 1−IoU 为 {np.median(iou):.3f}。"
-                   "不可把插值复核参考的细微变化当作独立逐帧人工真值。")
+                   "不能把这个面板的细微变化当成逐帧独立人工真值。")
     h = [r for r in d["history"] if r["lag"] == 1 and r["past"] is not None and r["now"] is not None]
     gains = [per_case([r for r in h if r["region"] == k], lambda r: r["now"]-r["past"])
              for k in ("edge", "cavity", "remainder")]
@@ -306,13 +311,20 @@ LITERATURE = (
 )
 
 
-def render(data, prior, prior_rows=(), references=()):
+def render(data, prior, prior_rows=(), references=(), figures=None):
     sections = []
+    proxy = data.get("dense_source") == "camus_half_proxy"
+    dense_warning = ("CAMUS 半周期发布掩码代理；中间帧不是独立参考，不支持全周期结论。" if proxy
+                     else "TED 完整周期参考：8 个手工锚点，其余插值后人工复核并按需修正。")
+    dense_name = "CAMUS 半周期代理" if proxy else "TED 开发参考"
     for code, title, fn in PLOTS:
         fig, desc = fn(data)
-        rendered = finish(fig) if fig is not None else '<p class="missing">未运行</p>'
+        save = figures / (code.replace("/", "_") + ".svg") if figures is not None else None
+        rendered = finish(fig, save) if fig is not None else '<p class="missing">未运行</p>'
         if code == "T2/T3":
-            rendered += dense_example(data)
+            rendered += dense_example(data, figures / "T2_example.svg" if figures is not None else None)
+        if fig is not None and code in ("T2/T3", "T4", "H1"):
+            desc += " " + dense_warning
         sections.append(f'<section><h2>{code} · {title}</h2>{rendered}<p>{escape(desc)}</p></section>')
     notes = "".join(f'<li><a href="{escape(u)}">{escape(title)}</a>：{escape(note)}</li>'
                     for title, u, note in LITERATURE)
@@ -349,7 +361,7 @@ summary{{cursor:pointer;padding:5px 0}}
 <p>开发集探索。图按物理时间、几何与功能、历史与学习、空间与外观组织。未读封存 TEST 标签，不训练模型。
 趋势线通常为患者均值的中位数，色带为患者间四分位数，不是置信区间。</p>
 <p>EchoNet 开发索引：{data['counts']['development_rows']:,}；有效双端点：{data['counts']['with_endpoint_pair']:,}；
-图像分析 VAL：{data['counts']['image_cases']:,}；TED 开发参考：{data['dense_cases']:,}。</p>
+图像分析 VAL：{data['counts']['image_cases']:,}；{dense_name}：{data['dense_cases']:,}。</p>
 <section><h2>外部现象和已知结果</h2><ul>{notes}</ul></section>
 <section><h2>本次读数与解释边界</h2>{readings(data)}</section>
 {''.join(sections)}
@@ -376,7 +388,9 @@ def main():
     if a.prior_table:
         with a.prior_table.open(encoding="utf-8-sig", newline="") as fp:
             rows = list(csv.DictReader(fp))
-    html = render(data, a.prior, rows, a.reference_image)
+    figures = a.result / "figures"
+    figures.mkdir(exist_ok=True)
+    html = render(data, a.prior, rows, a.reference_image, figures)
     (a.result / "report.html").write_text(html, encoding="utf-8")
     print(f"Saved {a.result / 'report.html'}")
 

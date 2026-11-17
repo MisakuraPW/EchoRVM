@@ -30,6 +30,12 @@ contours show their missing inputs instead of inferred labels. Use
 `--image-cases 8` and a separate output folder for an image smoke test.
 Dependencies: NumPy, SciPy, scikit-image, Matplotlib; SimpleITK for TED/CAMUS.
 
+For an explicitly labeled fallback, run `tools/prepare_camus_atlas.py`
+with `--camus-root` and a fresh `--output`. Pass its dense directory and
+ID list to the measurement tool with `--dense-source camus_half_proxy`.
+These are official CAMUS validation half-sequences and their released masks;
+intermediate masks are proxies, not independent full-cycle contours.
+
 TED items are selected by seeded candidate order and content-verified against
 **both** CAMUS development endpoint images. TED serial IDs are not CAMUS IDs.
 No holdout images, contours or config labels are used for matching. TED's
@@ -42,7 +48,7 @@ benchmark. TED: N. Painchaud et al., IEEE TMI 2022,
 
 ## Read the report
 
-`report.html` embeds SVG plots. `--prior-table AGGREGATE.csv` adds previously
+`report.html` embeds SVG plots and exports them to `figures/`. `--prior-table AGGREGATE.csv` adds previously
 reported metrics; `--prior "Title" CURVE.png` is repeatable. Literature
 figures are linked to the primary source, not counted as own results.
 Keep the aggregate measurement file with the report for provenance.
