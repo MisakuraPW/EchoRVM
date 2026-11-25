@@ -204,7 +204,25 @@ def e0(data, ft, cfg, dest):
     return result
 
 
+def endpoint(cfg, arm, source):
+    if not cfg.get('smoke'):
+        return frozen.endpoint(cfg,arm,source)
+    directory = layout(cfg,arm)['result']
+    summary = stage_a.completed(directory)
+    protocol = stage_a.verify_inputs(directory)
+    name = summary['best_file']
+    if Path(name).name!=name:
+        raise ValueError('Invalid selected smoke-checkpoint filename')
+    path = layout(cfg,arm)['ckpt']/name
+    if (not summary.get('smoke') or summary['selection']!='VAL only' or summary['mode']!='frozen_lite'
+            or protocol['source']!=file_hash(source) or file_hash(path)!=summary['checkpoints'][name]['sha256']):
+        raise ValueError('Expected a sealed VAL-selected smoke head from the same SSL source')
+    return directory,summary,path
+
+
 def compare_heads(cfg, source, data, dest, *, test=False):
+    if test and cfg.get('smoke'):
+        raise ValueError('Smoke cannot evaluate TEST')
     import torch
     from research_pipeline.cache import FeatureDataset
     from research_pipeline.ef_pairing import VIEWS, describe
@@ -216,7 +234,7 @@ def compare_heads(cfg, source, data, dest, *, test=False):
         return stage_a.read(dest/'summary.json')
     arms = tuple(stage['id'] for stage in cfg['stages'])
     requested = [stage_config(cfg,s) for s in cfg['stages']]
-    ends = {arm:frozen.endpoint(cfg,arm,source) for arm in arms}
+    ends = {arm:endpoint(cfg,arm,source) for arm in arms}
     if len({stage_a.read(path/'frozen_integrity.json')['backbone_digest'] for path,_,_ in ends.values()}) != 1:
         raise ValueError('Frozen arms used different backbone states')
     if (ends['I'][1]['cache']['directory']!=ends['J'][1]['cache']['directory'] or

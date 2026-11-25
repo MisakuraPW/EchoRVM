@@ -9,12 +9,12 @@ import torch
 
 from models.ef_readout import TemporalEFReadout
 from models.forward_temporal_mae import ForwardTemporalMAE
-from research_pipeline.artifacts import layout, write_json
+from research_pipeline.artifacts import layout, mark_done, write_json
 from research_pipeline.cli import configure
 from research_pipeline.config import load, stage_config
 from research_pipeline.ef_pairing import FrozenReadout, clip_views, describe
 from research_pipeline.engine import build_experiment, run_training
-from tools.run_ar_ef_pairing import compare_heads, dataset, e0, endpoint_group, reduce_results, uniform_starts
+from tools.run_ar_ef_pairing import compare_heads, dataset, e0, endpoint, endpoint_group, reduce_results, uniform_starts
 from utils.final_temporal_data import build_manifest
 
 
@@ -132,6 +132,12 @@ def test_real_adapter_fit_cache_val_lock_and_heldout_eval():
         held=compare_heads(cfg,source,dataset(test,'test',42),root/'test',test=True)
         assert set(held['metrics'])=={'I','J','R','P'}
         assert all(row['patients']==1 for row in held['metrics'].values())
+        directory,summary,path=endpoint(cfg,'I',source)
+        write_json(directory/'summary.json',dict(summary,smoke=True))
+        mark_done(directory,['summary.json','protocol.json'])
+        assert endpoint(dict(cfg,smoke=True),'I',source)[2]==path
+        with unittest.TestCase().assertRaisesRegex(ValueError,'Smoke cannot'):
+            compare_heads(dict(cfg,smoke=True),source,None,root/'invalid_test',test=True)
 
 
 def load_tests(loader, tests, pattern):
