@@ -20,7 +20,7 @@ from tools.run_patch8_stage_a import lock_selection, read, verify_inputs
 
 def check_draws(old, new):
     def draws(path):
-        with path.open(encoding='utf-8',newline='') as handle:
+        with path.open(encoding='utf-8-sig',newline='') as handle:
             return {int(r['epoch']):r['window_sequence_sha256'] for r in csv.DictReader(handle)}
     first,second = draws(old/'metrics.csv'),draws(new/'metrics.csv')
     matched = sorted(first.keys() & second.keys())
@@ -32,7 +32,7 @@ def check_draws(old, new):
 def reference_windows(directory, baseline):
     results = []
     for policy,expected in zip(('single','five'),baseline):
-        with (directory/policy/'candidate_windows.csv').open(encoding='utf-8',newline='') as handle:
+        with (directory/policy/'candidate_windows.csv').open(encoding='utf-8-sig',newline='') as handle:
             rows = [dict(patient=r['patient'],start=int(r['recent_start']),target=float(r['target']),
                          prediction=float(r['prediction'])) for r in csv.DictReader(handle)]
         keys = ('patient','start','target')
@@ -86,21 +86,38 @@ def run(args):
     dest = layout(cfg)['result']/'aux_queue'
     from utils.final_temporal_data import build_manifest
     with run_lock(dest):
-        lock_selection(dest/'protocol.json',dict(config=cfg,source=file_hash(source),m1=file_hash(m1[2]),
-            previous_m1_val=file_hash(m1_val/'DONE.json'),code=code_identity([__file__])))
+        protocol_path = dest/'protocol.json'
+        sources = dict(source=file_hash(source),m1=file_hash(m1[2]),
+                       previous_m1_val=file_hash(m1_val/'DONE.json'))
+        eval_only = args.action=='evaluate'
+        if eval_only:
+            prior = read(protocol_path)
+            check = lambda c: {k:v for k,v in c.items() if k!='runtime'}
+            if check(prior['config'])!=check(cfg) or any(prior.get(k)!=v for k,v in sources.items()):
+                raise ValueError('Existing training run does not match the immutable auxiliary evaluation inputs')
+            cfg = prior['config']
+            info = arm_endpoint(cfg,'M1_aux',source)
+            if read(info[0]/'request.json')['config']['training']!=cfg['training']:
+                raise ValueError('Existing M1_aux checkpoint does not match the original training budget')
+        else:
+            lock_selection(protocol_path,dict(config=cfg,**sources,code=code_identity([__file__])))
         if verify_done(dest):
             print(dest/'comparison.json')
             return
-        disk = layout(cfg)['ckpt']
-        disk.mkdir(parents=True,exist_ok=True)
-        if shutil.disk_usage(disk).free<5*1024**3:
-            raise OSError('Need at least 5 GiB free for recoverable FT checkpoints')
-        execute(cfg,only=['M1_aux'])
+        if not eval_only:
+            disk = layout(cfg)['ckpt']
+            disk.mkdir(parents=True,exist_ok=True)
+            if shutil.disk_usage(disk).free<5*1024**3:
+                raise OSError('Need at least 5 GiB free for recoverable FT checkpoints')
+            execute(cfg,only=['M1_aux'])
         if args.action=='smoke':
             write_json(dest/'comparison.json',dict(smoke=True,test=None))
             mark_done(dest,['protocol.json','comparison.json'])
             return
-        info = arm_endpoint(cfg,'M1_aux',source)
+        info = info if eval_only else arm_endpoint(cfg,'M1_aux',source)
+        if eval_only:
+            lock_selection(dest/'EVAL_PROTOCOL.json',dict(training_protocol_sha256=file_hash(protocol_path),
+                checkpoint_sha256=file_hash(info[2]),code=code_identity([__file__]),training=False))
         epochs = check_draws(m1[0],info[0])
         seed = cfg['data']['seed']
         val = dataset(manifest,'val',seed)
@@ -126,13 +143,14 @@ def run(args):
             M1_aux_test=aux_test,M1_residual_off_val=off_val,
             residual_off_reference='original locked M1 predictions (residual on); AR label in child output names reference'))
         mark_done(dest,['comparison.json','protocol.json','TEST_LOCK.json',
+            *(['EVAL_PROTOCOL.json'] if eval_only else []),
             *[p.name+'/DONE.json' for p in (off_dest,aux_dest,test_dest)]])
         print(dest/'comparison.json',flush=True)
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action',choices=['plan','smoke','run'])
+    p.add_argument('action',choices=['plan','smoke','run','evaluate'])
     p.add_argument('--tag',type=safe_name,required=True)
     p.add_argument('--cpu',action='store_true')
     defaults = dict(root='/root/autodl-fs/outputs_ar_motion_ft',previous_root='/root/autodl-fs/outputs_ar_motion_ft',

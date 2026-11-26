@@ -104,7 +104,7 @@ class MotionTests(unittest.TestCase):
                 folder = old/name
                 folder.mkdir()
                 (folder/'candidate_windows.csv').write_text(
-                    'patient,recent_start,target,prediction\np,4,50.0,54.0\n',encoding='utf-8')
+                    'patient,recent_start,target,prediction\np,4,50.0,54.0\n',encoding='utf-8-sig')
             self.assertEqual(reference_windows(old,(base,base))[0][0]['prediction'],54.)
             with self.assertRaisesRegex(ValueError,'differ'):
                 reference_windows(old,(base,[dict(base[0],start=5)]))
