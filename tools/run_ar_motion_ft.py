@@ -135,13 +135,18 @@ def arm_endpoint(cfg,name,source):
     return info
 
 
-def evaluate_arm(info, manifest, split, data, baseline, dest):
+def evaluate_arm(info, manifest, split, data, baseline, dest, *, residual=True):
     import torch
     from research_pipeline.engine import Heartbeat, amp_context, build_experiment
     from research_pipeline.runtime import loader
     from tools.watch_pipeline_progress import StageDisplay
+    if not residual and split!='val':
+        raise ValueError('Residual-off intervention is development-only')
     if verify_done(dest):
-        return read(dest/'summary.json')
+        saved = read(dest/'summary.json')
+        if saved.get('residual',True)!=residual:
+            raise ValueError('Saved evaluation used another inference intervention')
+        return saved
     d,summary,ckpt,req = info
     cfg = req['config']
     configure(cfg)
@@ -169,7 +174,7 @@ def evaluate_arm(info, manifest, split, data, baseline, dest):
             for batch in loader(windows,cfg,runtime,training=False):
                 clean = [{k:r[k] for k in ('video','prefix_frames','fps')} for r in batch]
                 with amp_context(cfg,device):
-                    p = exp.model(clean).float().tolist()
+                    p = exp.model(clean,residual=residual).float().tolist()
                 rows.extend(dict(patient=r['patient'],recent_start=int(r['recent_start']),
                                  target=float(r['target']),prediction=v*100) for v,r in zip(p,batch))
                 beat(phase='validation',arm=policy,completed=len(rows),total=len(windows))
@@ -183,7 +188,7 @@ def evaluate_arm(info, manifest, split, data, baseline, dest):
         arm_rows = dict(AR=truth,candidate=rows)
         result[policy],patients = reduce_results(arm_rows,groups,[('AR','candidate')])
         save_predictions(dest/policy,arm_rows,patients)
-    result.update(split=split,cost=timing,checkpoint=file_hash(ckpt),epoch=summary['selected_epoch'],
+    result.update(split=split,cost=timing,checkpoint=file_hash(ckpt),epoch=summary['selected_epoch'],residual=residual,
                   training_wall_seconds=summary['wall_seconds'],trainable_parameters=summary['trainable_parameters'])
     write_json(dest/'summary.json',result)
     paths = [str(p.relative_to(dest)) for p in sorted(dest.rglob('*.csv'))]

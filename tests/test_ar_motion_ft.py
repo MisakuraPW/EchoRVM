@@ -1,5 +1,7 @@
 import copy
 import math
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 import torch
@@ -7,7 +9,8 @@ import torch
 from models.forward_temporal_mae import ForwardTemporalMAE
 from research_pipeline.ar_motion_ft import MotionExperiment, MotionTask, TrainAreas, area_log_targets, window_target
 from research_pipeline.echo import TemporalTask
-from tools.run_ar_motion_ft import second_arm
+from tools.run_ar_motion_aux import check_draws, reference_windows
+from tools.run_ar_motion_ft import evaluate_arm, second_arm
 
 
 def fixture():
@@ -82,3 +85,28 @@ class MotionTests(unittest.TestCase):
             TrainAreas(NotTrain())
         self.assertEqual(second_arm(.1),'M1_aux')
         self.assertEqual(second_arm(.099),'M2')
+
+    def test_aux_runner_matches_archived_training_and_val_windows(self):
+        with TemporaryDirectory() as directory:
+            p = Path(directory)
+            old,new = (p/name for name in ('old','new'))
+            old.mkdir()
+            new.mkdir()
+            rows = 'epoch,window_sequence_sha256\n1,same\n'
+            (old/'metrics.csv').write_text(rows,encoding='utf-8')
+            (new/'metrics.csv').write_text(rows+'2,extra\n',encoding='utf-8')
+            self.assertEqual(check_draws(old,new),[1])
+            (new/'metrics.csv').write_text(rows.replace('same','different'),encoding='utf-8')
+            with self.assertRaisesRegex(ValueError,'different'):
+                check_draws(old,new)
+            base = [dict(patient='p',start=4,target=50.,prediction=55.)]
+            for name in ('single','five'):
+                folder = old/name
+                folder.mkdir()
+                (folder/'candidate_windows.csv').write_text(
+                    'patient,recent_start,target,prediction\np,4,50.0,54.0\n',encoding='utf-8')
+            self.assertEqual(reference_windows(old,(base,base))[0][0]['prediction'],54.)
+            with self.assertRaisesRegex(ValueError,'differ'):
+                reference_windows(old,(base,[dict(base[0],start=5)]))
+            with self.assertRaisesRegex(ValueError,'development-only'):
+                evaluate_arm(None,None,'test',None,None,old,residual=False)
